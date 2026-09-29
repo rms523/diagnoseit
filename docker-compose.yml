@@ -1,0 +1,147 @@
+# DiagnoseIt self-hosting stack.
+#
+#   docker compose up -d        # then open http://localhost:3000
+#
+# Optional settings go in a .env file next to this one (see .env.example). The first start runs
+# database migrations and loads the lab test catalog, which takes a minute.
+# `make up` runs this same file for development (API published to the LAN for the mobile app).
+
+x-app: &app
+  image: ${DIAGNOSEIT_IMAGE_PREFIX:-diagnoseit}-backend:${DIAGNOSEIT_TAG:-latest}
+  build: .
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    DEBUG: "False"
+    # Any value selects PostgreSQL; the connection uses the POSTGRES_* settings below.
+    DATABASE_URL: postgresql
+    POSTGRES_HOST: db
+    POSTGRES_DB: diagnoseit
+    POSTGRES_USER: diagnoseit
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-diagnoseit}
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
+    # Plain HTTP on localhost by default. Behind an HTTPS proxy, set these to True (and HSTS seconds).
+    SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-False}
+    CSRF_COOKIE_SECURE: ${CSRF_COOKIE_SECURE:-False}
+    SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-False}
+    SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-0}
+    # The optional `ollama` profile below; point elsewhere to use your own OCR server.
+    OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+  restart: unless-stopped
+
+x-worker-healthcheck: &worker-healthcheck
+  # The image's HEALTHCHECK probes the web API, which workers do not serve.
+  test: ["CMD-SHELL", "uv run celery -A diagnoseit_backend inspect ping -d celery@$$HOSTNAME --timeout 10 >/dev/null || exit 1"]
+  interval: 60s
+  timeout: 30s
+  retries: 3
+  start_period: 30s
+
+services:
+  backend:
+    <<: *app
+    environment:
+      <<: *app-env
+      DIAGNOSEIT_INIT: "1"
+    # Also keep the localhost API port used by earlier TLS proxy deployments.
+    # `make up` sets DIAGNOSEIT_API_BIND=0.0.0.0 so a phone running the Expo app can reach it.
+    ports:
+      - "${DIAGNOSEIT_API_BIND:-127.0.0.1}:8000:8000"
+    volumes: &app-volumes
+      - media:/app/media
+      - app_data:/app/data
+      - static:/app/staticfiles
+      # Custom report formats without rebuilding the image (see report_formats/README.md):
+      # - ./report_formats:/app/report_formats:ro
+      # Live parser edits while developing (also add to the workers' volumes):
+      # - ./utils:/app/utils
+      # - ./medical_reports:/app/medical_reports
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/api/auth/csrf-token/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Migrations and the catalog load run before the server starts.
+      start_period: 300s
+
+  # Parses uploaded reports and prescriptions.
+  celery_worker:
+    <<: *app
+    command: uv run celery -A diagnoseit_backend worker -Q celery -l info -c 2
+    volumes: *app-volumes
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+
+  # Runs AI reviews one at a time, so they do not compete for the model server.
+  celery_review_worker:
+    <<: *app
+    command: uv run celery -A diagnoseit_backend worker -Q ai_review -l info -c 1
+    volumes: *app-volumes
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+
+  # Web app; also proxies /api and /admin to the backend.
+  frontend:
+    image: ${DIAGNOSEIT_IMAGE_PREFIX:-diagnoseit}-web:${DIAGNOSEIT_TAG:-latest}
+    build: ./frontend/diagnoseit-web
+    ports:
+      # Local only by default. Set DIAGNOSEIT_BIND=0.0.0.0 to reach it from other devices.
+      - "${DIAGNOSEIT_BIND:-127.0.0.1}:${DIAGNOSEIT_PORT:-3000}:80"
+    volumes:
+      - static:/usr/share/nginx/backend-static:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: diagnoseit
+      POSTGRES_USER: diagnoseit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-diagnoseit}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U diagnoseit -d diagnoseit"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  # Optional local OCR for scanned PDFs: docker compose --profile ollama up -d,
+  # then: docker compose exec ollama ollama pull qwen3-vl:4b
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  # Defaults match Compose's original project-scoped names. Set these in .env when
+  # reusing volumes created by an older deployment with different names.
+  db_data:
+    name: ${DIAGNOSEIT_DB_VOLUME:-${COMPOSE_PROJECT_NAME}_db_data}
+  media:
+    name: ${DIAGNOSEIT_MEDIA_VOLUME:-${COMPOSE_PROJECT_NAME}_media}
+  static:
+    name: ${DIAGNOSEIT_STATIC_VOLUME:-${COMPOSE_PROJECT_NAME}_static}
+  app_data:
+  ollama:

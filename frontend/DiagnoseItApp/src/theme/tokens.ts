@@ -1,0 +1,35 @@
+/** Specimen Ledger design tokens — aligned with diagnoseit-web/src/index.css */
+export const tokens = {
+  paper: '#F7F5F0',
+  paperElevated: '#FFFFFF',
+  paperMuted: '#EDEAE3',
+  paperInset: '#E8E4DB',
+  ink: '#1C2333',
+  inkSecondary: '#4A5068',
+  inkMuted: '#7A8094',
+  inkFaint: '#A8ADBC',
+  teal: '#2A7B7E',
+  tealLight: '#3A9598',
+  tealDim: 'rgba(42, 123, 126, 0.1)',
+  coral: '#C45C4A',
+  coralDim: 'rgba(196, 92, 74, 0.1)',
+  sage: '#4A7C59',
+  sageDim: 'rgba(74, 124, 89, 0.1)',
+  amber: '#B8860B',
+  amberDim: 'rgba(184, 134, 11, 0.1)',
+  slate: '#3D4F6F',
+  slateDim: 'rgba(61, 79, 111, 0.1)',
+  borderHover: '#D5D0C5',
+  radiusSm: 4,
+  radiusMd: 6,
+  radiusLg: 8,
+} as const;
+
+export const fonts = {
+  display: 'Literata_600SemiBold',
+  displayRegular: 'Literata_400Regular',
+  body: 'IBMPlexSans_400Regular',
+  bodyMedium: 'IBMPlexSans_500Medium',
+  bodySemiBold: 'IBMPlexSans_600SemiBold',
+  mono: 'IBMPlexMono_400Regular',
+} as const;

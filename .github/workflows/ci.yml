@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: diagnoseit
+          POSTGRES_USER: diagnoseit
+          POSTGRES_PASSWORD: diagnoseit
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U diagnoseit"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      SECRET_KEY: ci-only-not-secret
+      DEBUG: "True"
+      DATABASE_URL: postgresql
+      POSTGRES_HOST: localhost
+      POSTGRES_PASSWORD: diagnoseit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Tests
+        run: uv run python manage.py test users medical_reports prescriptions symptoms diagnosis lab_tests ai_settings utils
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/diagnoseit-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/diagnoseit-web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/DiagnoseItApp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/DiagnoseItApp/package-lock.json
+      - run: npm ci --legacy-peer-deps
+      - run: npx tsc --noEmit
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose file
+        run: docker compose config -q
+      - name: Build images
+        run: docker compose build
