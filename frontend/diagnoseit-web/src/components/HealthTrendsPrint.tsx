@@ -61,6 +61,16 @@ function UnitMark({ point }: { point: HealthTrendPoint }) {
 }
 
 /**
+ * Safari, and every browser on iOS, which all print with WebKit. WebKit prints a table's head only on the
+ * page the table starts on (bugs.webkit.org/17205), so the repeated head cannot give its later pages a
+ * margin; these browsers get real page margins instead, and their own header and footer with them.
+ */
+function printsWithWebKit(): boolean {
+  const agent = navigator.userAgent;
+  return /AppleWebKit\//.test(agent) && !/(Chrome|Chromium|Edg|OPR)\//.test(agent);
+}
+
+/**
  * The page the browser prints from Health Trends: who the results belong to, the chart, and every result
  * of each charted test with its reference range, results outside it in red. Report titles are left out,
  * since they are usually the uploaded file's name and mean nothing to whoever reads the printout.
@@ -138,53 +148,104 @@ const HealthTrendsPrint: React.FC<Props> = ({ trends, chartSeries, layout, scale
     </>
   );
 
-  const perTestTables = sorted.map(item => {
-    const converted = item.points.some(point => point.unit_status === 'converted');
-    const unconverted = item.points.some(point => point.unit_status === 'unconverted');
-    return (
-      <section className="trend-print-test" key={item.key}>
-        <h2>
-          <i style={{ background: item.color }} />
-          {item.name}
-          {item.unit && <span> · {item.unit}</span>}
-        </h2>
-        {item.points.length === 0 ? (
-          <p className="trend-print-note">No results.</p>
-        ) : (
-          <table className="trend-print-table">
-            <thead>
+  const paged = printsWithWebKit();
+  const bornOn = user?.date_of_birth ? `born ${longDate(user.date_of_birth)}` : '';
+  const runningLine = [patientName, bornOn].filter(Boolean).join(', ');
+
+  // The results are one table, never one nested in another, so the browser can keep each row whole on its
+  // page. Its head is repeated on every page the table continues to (except by WebKit, see above): an empty
+  // row giving the page its top margin, a line naming the patient, and the column headings. The empty row
+  // of its foot gives every page its bottom margin.
+  const space = (span: number) => (
+    <tr className="trend-print-space-row">
+      <td colSpan={span}><div className="trend-print-space" /></td>
+    </tr>
+  );
+  const head = (span: number, title: string, headings: React.ReactNode) => (
+    <thead>
+      {space(span)}
+      <tr className="trend-print-running">
+        <td colSpan={span}>
+          <strong>{title}</strong>
+          {runningLine && <span> · {runningLine}</span>}
+        </td>
+      </tr>
+      <tr>{headings}</tr>
+    </thead>
+  );
+  const foot = (span: number) => <tfoot>{space(span)}</tfoot>;
+  const notes = (span: number, content: React.ReactNode) => (
+    <tbody>
+      <tr className="trend-print-notes">
+        <td colSpan={span}>
+          {content}
+          <footer className="trend-print-footer">
+            {flaggedCount > 0
+              ? `${flaggedCount} result${flaggedCount !== 1 ? 's' : ''} outside the reference range, shown in red. `
+              : 'No result is flagged outside its reference range. '}
+            Each value is read against the reference range printed beside it; a result without a readable
+            range keeps the flag stored for it (the lab&apos;s, or the usual adult range for that test).
+          </footer>
+        </td>
+      </tr>
+    </tbody>
+  );
+
+  const perTestTable = () => (
+    <table className="trend-print-table">
+      <colgroup>
+        <col className="trend-print-col-date" />
+        <col className="trend-print-col-result" />
+        <col />
+        <col className="trend-print-col-flag" />
+      </colgroup>
+      {head(4, 'Results by test', <><th>Date</th><th>Result</th><th>Reference range</th><th>Flag</th></>)}
+      {sorted.map(item => {
+        const converted = item.points.some(point => point.unit_status === 'converted');
+        const unconverted = item.points.some(point => point.unit_status === 'unconverted');
+        return (
+          <tbody key={item.key}>
+            <tr className="trend-print-section">
+              <th colSpan={4} scope="rowgroup">
+                <i style={{ background: item.color }} />
+                {item.name}
+                {item.unit && <span> · {item.unit}</span>}
+              </th>
+            </tr>
+            {item.points.length === 0 && (
               <tr>
-                <th>Date</th>
-                <th>Result</th>
-                <th>Reference range</th>
-                <th>Flag</th>
+                <td colSpan={4} className="trend-print-empty">No results.</td>
               </tr>
-            </thead>
-            <tbody>
-              {item.points.map(point => {
-                const flag = resultFlag(point);
-                const flagged = isOutOfRange(flag);
-                return (
-                  <tr key={point.result_id} className={flagged ? 'trend-print-flagged' : undefined}>
-                    <td>{point.date ? longDate(point.date) : '—'}</td>
-                    <td className="trend-print-value">
-                      {point.value}{point.unit ? ` ${point.unit}` : ''}
-                      <UnitMark point={point} />
-                    </td>
-                    <td>{point.reference_range || '—'}</td>
-                    <td className="trend-print-flag">
-                      {flag ? FLAG_LABELS[flag] ?? flag : '—'}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-        {footnotes(converted, unconverted, item.unit)}
-      </section>
-    );
-  });
+            )}
+            {item.points.map(point => {
+              const flag = resultFlag(point);
+              const flagged = isOutOfRange(flag);
+              return (
+                <tr key={point.result_id} className={flagged ? 'trend-print-flagged' : undefined}>
+                  <td>{point.date ? longDate(point.date) : '—'}</td>
+                  <td className="trend-print-value">
+                    {point.value}{point.unit ? ` ${point.unit}` : ''}
+                    <UnitMark point={point} />
+                  </td>
+                  <td>{point.reference_range || '—'}</td>
+                  <td className="trend-print-flag">
+                    {flag ? FLAG_LABELS[flag] ?? flag : '—'}
+                  </td>
+                </tr>
+              );
+            })}
+            {(converted || unconverted) && (
+              <tr className="trend-print-notes">
+                <td colSpan={4}>{footnotes(converted, unconverted, item.unit)}</td>
+              </tr>
+            )}
+          </tbody>
+        );
+      })}
+      {notes(4, null)}
+      {foot(4)}
+    </table>
+  );
 
   const combinedTable = () => {
     // A row per date, repeated when a test has more than one result that day, so no result is hidden.
@@ -202,136 +263,123 @@ const HealthTrendsPrint: React.FC<Props> = ({ trends, chartSeries, layout, scale
       return Array.from({ length: count }, (_, index) => ({ date, index }));
     });
     const ranges = sorted.map(item => sharedRange(item.points));
+    const span = sorted.length + 1;
 
     return (
-      <section className="trend-print-test">
-        <h2>All results</h2>
-        <table className="trend-print-table trend-print-combined">
-          <thead>
-            <tr>
-              <th>Date</th>
-              {sorted.map((item, index) => (
-                <th key={item.key}>
-                  <span className="trend-print-column-name">
-                    <i style={{ background: item.color }} />
-                    {item.name}
-                  </span>
-                  {item.unit && <span className="trend-print-column-detail">{item.unit}</span>}
-                  {ranges[index] && <span className="trend-print-column-detail">Ref {ranges[index]}</span>}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {tableRows.map(row => (
-              <tr key={`${row.date}-${row.index}`}>
-                <td>{row.date ? longDate(row.date) : 'No date'}</td>
-                {sorted.map((item, index) => {
-                  const point = byDate[index].get(row.date)?.[row.index];
-                  if (!point) return <td key={item.key} className="trend-print-empty">—</td>;
-                  const flag = resultFlag(point);
-                  const flagged = isOutOfRange(flag);
-                  // A unit differing from the column's, or a range the heading does not give, is written in.
-                  const ownUnit = point.unit && point.unit !== item.unit ? ` ${point.unit}` : '';
-                  return (
-                    <td key={item.key} className={`trend-print-value${flagged ? ' trend-print-flagged-cell' : ''}`}>
-                      {point.value}{ownUnit}
-                      {flagged && <span className="trend-print-mark"> {FLAG_MARKS[flag]}</span>}
-                      <UnitMark point={point} />
-                      {!ranges[index] && point.reference_range && (
-                        <span className="trend-print-cell-range">Ref {point.reference_range}</span>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
+      <table className="trend-print-table trend-print-combined">
+        {head(span, 'All results', (
+          <>
+            <th>Date</th>
+            {sorted.map((item, index) => (
+              <th key={item.key}>
+                <span className="trend-print-column-name">
+                  <i style={{ background: item.color }} />
+                  {item.name}
+                </span>
+                {item.unit && <span className="trend-print-column-detail">{item.unit}</span>}
+                {ranges[index] && <span className="trend-print-column-detail">Ref {ranges[index]}</span>}
+              </th>
             ))}
-          </tbody>
-        </table>
-        <p className="trend-print-note">
-          H high · L low · A abnormal: each value read against the reference range printed beside it, or the
-          lab&apos;s flag where there is no range to read.
-        </p>
-        {footnotes(anyConverted, anyUnconverted)}
-      </section>
+          </>
+        ))}
+        <tbody className="trend-print-rows">
+          {tableRows.map(row => (
+            <tr key={`${row.date}-${row.index}`}>
+              <td>{row.date ? longDate(row.date) : 'No date'}</td>
+              {sorted.map((item, index) => {
+                const point = byDate[index].get(row.date)?.[row.index];
+                if (!point) return <td key={item.key} className="trend-print-empty">—</td>;
+                const flag = resultFlag(point);
+                const flagged = isOutOfRange(flag);
+                // A unit differing from the column's, or a range the heading does not give, is written in.
+                const ownUnit = point.unit && point.unit !== item.unit ? ` ${point.unit}` : '';
+                return (
+                  <td key={item.key} className={`trend-print-value${flagged ? ' trend-print-flagged-cell' : ''}`}>
+                    {point.value}{ownUnit}
+                    {flagged && <span className="trend-print-mark"> {FLAG_MARKS[flag]}</span>}
+                    <UnitMark point={point} />
+                    {!ranges[index] && point.reference_range && (
+                      <span className="trend-print-cell-range">Ref {point.reference_range}</span>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+        {notes(span, (
+          <>
+            <p className="trend-print-note">
+              H high · L low · A abnormal: each value read against the reference range printed beside it, or the
+              lab&apos;s flag where there is no range to read.
+            </p>
+            {footnotes(anyConverted, anyUnconverted)}
+          </>
+        ))}
+        {foot(span)}
+      </table>
     );
   };
 
+  const classes = ['trend-print', wide && 'trend-print-wide', paged && 'trend-print-paged'].filter(Boolean).join(' ');
   return createPortal(
-    <div className={`trend-print${wide ? ' trend-print-wide' : ''}`} aria-hidden>
-      {/* The empty head and foot repeat on every printed page, giving each page its margins. */}
-      <table className="trend-print-frame">
-        <thead><tr><td><div className="trend-print-space" /></td></tr></thead>
-        <tfoot><tr><td><div className="trend-print-space" /></td></tr></tfoot>
-        <tbody>
-          <tr>
-            <td>
-              <header className="trend-print-header">
-                <div>
-                  <h1>Laboratory results over time</h1>
-                  <p className="trend-print-tests">{names}</p>
-                </div>
-                <dl className="trend-print-patient">
-                  {patientName && <><dt>Patient</dt><dd>{patientName}</dd></>}
-                  {user?.date_of_birth && <><dt>Date of birth</dt><dd>{longDate(user.date_of_birth)}</dd></>}
-                  {user?.gender && SEX_LABELS[user.gender] && <><dt>Sex</dt><dd>{SEX_LABELS[user.gender]}</dd></>}
-                  {dates.length > 0 && (
-                    <>
-                      <dt>Results</dt>
-                      <dd>
-                        {dates[0] === dates[dates.length - 1]
-                          ? longDate(dates[0])
-                          : `${longDate(dates[0])} – ${longDate(dates[dates.length - 1])}`}
-                      </dd>
-                    </>
-                  )}
-                  <dt>Printed</dt><dd>{longDate(new Date())}</dd>
-                </dl>
-              </header>
+    <div className={classes} aria-hidden>
+      {/* Later in the page than index.css, so it wins over the margin of 0 there. */}
+      {paged && <style>{'@media print { @page { margin: 12mm 14mm; } @page trend-print-wide { margin: 12mm 14mm; } }'}</style>}
+      <header className="trend-print-header">
+        <div>
+          <h1>Laboratory results over time</h1>
+          <p className="trend-print-tests">{names}</p>
+        </div>
+        <dl className="trend-print-patient">
+          {patientName && <><dt>Patient</dt><dd>{patientName}</dd></>}
+          {user?.date_of_birth && <><dt>Date of birth</dt><dd>{longDate(user.date_of_birth)}</dd></>}
+          {user?.gender && SEX_LABELS[user.gender] && <><dt>Sex</dt><dd>{SEX_LABELS[user.gender]}</dd></>}
+          {dates.length > 0 && (
+            <>
+              <dt>Results</dt>
+              <dd>
+                {dates[0] === dates[dates.length - 1]
+                  ? longDate(dates[0])
+                  : `${longDate(dates[0])} – ${longDate(dates[dates.length - 1])}`}
+              </dd>
+            </>
+          )}
+          <dt>Printed</dt><dd>{longDate(new Date())}</dd>
+        </dl>
+      </header>
 
-              {chartSeries.length > 0 && (
-                <section className="trend-print-chart">
-                  <canvas ref={canvasRef} />
-                  <div className="trend-print-legend">
-                    {showLegend && trends.filter(item => chartSeries.some(series => series.key === item.key)).map(item => (
-                      <span key={item.key}>
-                        <i style={{ background: item.color }} />
-                        {item.name}{item.unit ? ` (${item.unit})` : ''}
-                      </span>
-                    ))}
-                    <span>
-                      <i className="trend-print-flag-dot" />
-                      Outside reference range
-                    </span>
-                    {!showLegend && (
-                      <span>
-                        <i className="trend-print-range-swatch" />
-                        Reference range
-                      </span>
-                    )}
-                  </div>
-                  {showLegend && scale === 'indexed' && (
-                    <p className="trend-print-note">
-                      These tests use different units, so each line is drawn over its own range (0% its lowest
-                      result, 100% its highest). Compare the shapes; the tables give the real values.
-                    </p>
-                  )}
-                </section>
-              )}
+      {chartSeries.length > 0 && (
+        <section className="trend-print-chart">
+          <canvas ref={canvasRef} />
+          <div className="trend-print-legend">
+            {showLegend && trends.filter(item => chartSeries.some(series => series.key === item.key)).map(item => (
+              <span key={item.key}>
+                <i style={{ background: item.color }} />
+                {item.name}{item.unit ? ` (${item.unit})` : ''}
+              </span>
+            ))}
+            <span>
+              <i className="trend-print-flag-dot" />
+              Outside reference range
+            </span>
+            {!showLegend && (
+              <span>
+                <i className="trend-print-range-swatch" />
+                Reference range
+              </span>
+            )}
+          </div>
+          {showLegend && scale === 'indexed' && (
+            <p className="trend-print-note">
+              These tests use different units, so each line is drawn over its own range (0% its lowest
+              result, 100% its highest). Compare the shapes; the tables give the real values.
+            </p>
+          )}
+        </section>
+      )}
 
-              {tables === 'combined' ? combinedTable() : perTestTables}
-
-              <footer className="trend-print-footer">
-                {flaggedCount > 0
-                  ? `${flaggedCount} result${flaggedCount !== 1 ? 's' : ''} outside the reference range, shown in red. `
-                  : 'No result is flagged outside its reference range. '}
-                Each value is read against the reference range printed beside it; a result without a readable
-                range keeps the flag stored for it (the lab&apos;s, or the usual adult range for that test).
-              </footer>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      {tables === 'combined' ? combinedTable() : perTestTable()}
     </div>,
     document.body,
   );
