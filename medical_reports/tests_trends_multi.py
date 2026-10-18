@@ -90,7 +90,10 @@ class MultiTrendTests(TestCase):
 
         too_many = self.client.get(
             "/api/medical-reports/trends/multi/",
-            {"test_type": ["hemoglobin", "glucose", "creatinine", "urea", "sodium", "potassium", "calcium"]},
+            {"test_type": [
+                "hemoglobin", "glucose", "creatinine", "urea", "sodium", "potassium", "calcium",
+                "chloride", "albumin", "bilirubin", "magnesium",
+            ]},
         )
         self.assertEqual(too_many.status_code, 400)
         self.assertIn("at most", too_many.data["error"])

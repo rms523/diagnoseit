@@ -5,9 +5,11 @@ import type { HealthTrendData, HealthTrendParameter, HealthTrendPoint, TrendSele
 import { apiErrorMessage } from '../utils/apiErrors';
 import { copyText } from '../utils/clipboard';
 import { useToast } from '../contexts/ToastContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   SERIES_COLORS,
   drawTrendChart,
+  gridColumns,
   plottablePoints,
   type ChartLayout,
   type ChartPoint,
@@ -16,11 +18,27 @@ import {
   type TrendSeries,
 } from '../utils/trendChart';
 import { IconCopy, IconSearch, IconTrends } from './Icons';
+import HealthTrendsPrint, { type PrintChart, type PrintTables } from './HealthTrendsPrint';
 import TestNameLinks from './TestNameLinks';
 import TestResultSearch from './TestResultSearch';
 
 /** As many tests as the endpoint will chart at once, and as many colours as stay apart on one chart. */
-const MAX_SERIES = 6;
+const MAX_SERIES = 10;
+
+const PRINT_OPTIONS_KEY = 'diagnoseit.healthTrends.print';
+
+/** How the last printout was laid out, so the next one starts the same way. */
+function savedPrintOptions(): { tables: PrintTables; chart: PrintChart } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PRINT_OPTIONS_KEY) ?? '{}');
+    return {
+      tables: saved.tables === 'combined' ? 'combined' : 'perTest',
+      chart: saved.chart === 'screen' ? 'screen' : 'grid',
+    };
+  } catch {
+    return { tables: 'perTest', chart: 'grid' };
+  }
+}
 
 /** A test the user picked to chart, in the order they picked it. `key` matches the trend the API returns. */
 interface TrendPick {
@@ -50,6 +68,7 @@ function sameUnit(a: string, b: string): boolean {
 
 const HealthTrends: React.FC = () => {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [picks, setPicks] = useState<TrendPick[]>([]);
   const [series, setSeries] = useState<HealthTrendData[]>([]);
@@ -57,7 +76,12 @@ const HealthTrends: React.FC = () => {
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [availableTests, setAvailableTests] = useState<HealthTrendParameter[]>([]);
-  const [layout, setLayout] = useState<TrendLayoutMode>('overlay');
+  // 'auto' overlays up to three tests and gives each its own small chart past that, where lines tangle.
+  const [layoutChoice, setLayoutChoice] = useState<TrendLayoutMode | 'auto'>('auto');
+  const [chartWidth, setChartWidth] = useState(0);
+  const [printOptions, setPrintOptions] = useState(savedPrintOptions);
+  const [printMenuOpen, setPrintMenuOpen] = useState(false);
+  const printMenuRef = useRef<HTMLDivElement>(null);
   // 'auto' keeps real values while the tests share a unit, and indexes them when they do not.
   const [scaleChoice, setScaleChoice] = useState<TrendScaleMode | 'auto'>('auto');
   // The test finder below keeps its query here, so Find on an unlinked name searches without leaving.
@@ -100,6 +124,9 @@ const HealthTrends: React.FC = () => {
 
   const drawable = useMemo(() => charted.filter(item => item.points.length > 0), [charted]);
   const single = charted.length === 1 ? charted[0] : null;
+
+  const layout: TrendLayoutMode =
+    layoutChoice !== 'auto' ? layoutChoice : drawable.length > 3 ? 'grid' : 'overlay';
 
   const scale: TrendScaleMode = useMemo(() => {
     if (scaleChoice !== 'auto') return scaleChoice;
@@ -182,8 +209,14 @@ const HealthTrends: React.FC = () => {
     setPicks(current => current.filter(pick => pick.key !== key));
   };
 
-  // Stacked panels need room: each test gets its own strip under the one above it.
-  const chartHeight = layout === 'stacked' ? Math.max(320, drawable.length * 130 + 60) : 320;
+  // Stacked and grid layouts need room: each test gets a strip, or a small chart, of its own.
+  const gridRows = Math.ceil(drawable.length / gridColumns(chartWidth, drawable.length));
+  const chartHeight =
+    drawable.length < 2 || layout === 'overlay'
+      ? 320
+      : layout === 'stacked'
+        ? Math.max(320, drawable.length * 120 + 40)
+        : gridRows * 220 + (gridRows - 1) * 14;
 
   const scheduleDraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -225,8 +258,14 @@ const HealthTrends: React.FC = () => {
   }, [scheduleDraw, chartHeight]);
 
   useEffect(() => {
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => scheduleDraw()) : null;
     const el = canvasRef.current?.parentElement;
+    const ro = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => {
+        // The grid's column count, and so the chart's height, follows the width.
+        if (el) setChartWidth(el.getBoundingClientRect().width);
+        scheduleDraw();
+      })
+      : null;
     if (ro && el) ro.observe(el);
     const handleResize = () => scheduleDraw();
     window.addEventListener('resize', handleResize);
@@ -257,6 +296,39 @@ const HealthTrends: React.FC = () => {
   const selectNearestPoint = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const point = nearestPoint(e);
     if (point) selectPoint(point.trend, point.seriesKey);
+  };
+
+  useEffect(() => {
+    if (!printMenuOpen) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !printMenuRef.current?.contains(e.target as Node)) {
+        setPrintMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [printMenuOpen]);
+
+  const choosePrintOption = (change: Partial<typeof printOptions>) => {
+    setPrintOptions(current => {
+      const next = { ...current, ...change };
+      try {
+        localStorage.setItem(PRINT_OPTIONS_KEY, JSON.stringify(next));
+      } catch {
+        /* the choice holds for this visit */
+      }
+      return next;
+    });
+  };
+
+  const print = () => {
+    setPrintMenuOpen(false);
+    // After the menu has closed and the print view has the chosen layout.
+    window.setTimeout(() => window.print(), 0);
   };
 
   const selectPoint = (point: HealthTrendPoint, key: string) => {
@@ -403,9 +475,74 @@ const HealthTrends: React.FC = () => {
           <p className="page-subtitle">Track how your test results change over time, one test or several together</p>
         </div>
         {totalPoints > 0 && (
-          <button className="btn btn-secondary btn-sm" onClick={exportCSV}>
-            Export CSV
-          </button>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <div className="print-menu" ref={printMenuRef}>
+              <button
+                className="btn btn-secondary btn-sm"
+                aria-haspopup="dialog"
+                aria-expanded={printMenuOpen}
+                onClick={() => setPrintMenuOpen(open => !open)}
+                title="Print the chart and every data point, with out-of-range results in red"
+              >
+                Print ▾
+              </button>
+              {printMenuOpen && (
+                <div className="print-menu-panel card" role="dialog" aria-label="Print options">
+                  <fieldset>
+                    <legend>Data points</legend>
+                    <label>
+                      <input
+                        type="radio"
+                        name="print-tables"
+                        checked={printOptions.tables === 'perTest'}
+                        onChange={() => choosePrintOption({ tables: 'perTest' })}
+                      />
+                      A table for each test
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="print-tables"
+                        checked={printOptions.tables === 'combined'}
+                        onChange={() => choosePrintOption({ tables: 'combined' })}
+                      />
+                      One table with every test
+                      <span className="form-hint">A row per date, a column per test; landscape past five tests.</span>
+                    </label>
+                  </fieldset>
+                  {drawable.length > 1 && (
+                    <fieldset>
+                      <legend>Chart</legend>
+                      <label>
+                        <input
+                          type="radio"
+                          name="print-chart"
+                          checked={printOptions.chart === 'grid'}
+                          onChange={() => choosePrintOption({ chart: 'grid' })}
+                        />
+                        A small chart for each test
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="print-chart"
+                          checked={printOptions.chart === 'screen'}
+                          onChange={() => choosePrintOption({ chart: 'screen' })}
+                        />
+                        As shown on screen
+                      </label>
+                    </fieldset>
+                  )}
+                  <button type="button" className="btn btn-primary btn-sm" onClick={print}>
+                    Print
+                  </button>
+                </div>
+              )}
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={exportCSV}>
+              Export CSV
+            </button>
+          </div>
         )}
       </div>
 
@@ -541,11 +678,13 @@ const HealthTrends: React.FC = () => {
                         <select
                           aria-label="How the tests are laid out"
                           className="form-select form-select-sm"
-                          value={layout}
-                          onChange={e => setLayout(e.target.value as TrendLayoutMode)}
+                          value={layoutChoice}
+                          onChange={e => setLayoutChoice(e.target.value as TrendLayoutMode | 'auto')}
                         >
-                          <option value="overlay">Stacked on one chart</option>
-                          <option value="stacked">One panel each</option>
+                          <option value="auto">Layout: automatic</option>
+                          <option value="overlay">All on one chart</option>
+                          <option value="stacked">One strip each, one date axis</option>
+                          <option value="grid">Small charts side by side</option>
                         </select>
                         {layout === 'overlay' && (
                           <select
@@ -797,6 +936,24 @@ const HealthTrends: React.FC = () => {
             </>
           )}
         </>
+      )}
+
+      {picks.length > 0 && !waiting && totalPoints > 0 && (
+        <HealthTrendsPrint
+          trends={charted.map(item => ({
+            key: item.pick.key,
+            name: item.pick.name,
+            unit: item.unit,
+            color: item.color,
+            data: item.data,
+          }))}
+          chartSeries={chartSeries}
+          layout={layout}
+          scale={scale}
+          tables={printOptions.tables}
+          chart={printOptions.chart}
+          user={user}
+        />
       )}
 
       {/* Default empty state */}

@@ -440,7 +440,7 @@ def get_health_trends(request):
     ))
 
 
-MAX_COMPARED_TRENDS = 6
+MAX_COMPARED_TRENDS = 10
 
 
 @api_view(['GET'])
