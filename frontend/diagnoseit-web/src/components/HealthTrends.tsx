@@ -123,7 +123,7 @@ const HealthTrends: React.FC = () => {
   );
 
   const drawable = useMemo(() => charted.filter(item => item.points.length > 0), [charted]);
-  // Kept stable across renders (a hover re-renders the page), since the print view measures itself when it changes.
+  // Kept stable across renders, so a hover over the chart does not redraw the print view's chart.
   const printedTrends = useMemo(
     () => charted.map(item => ({ key: item.pick.key, name: item.pick.name, unit: item.unit, color: item.color, data: item.data })),
     [charted],

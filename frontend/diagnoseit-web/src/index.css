@@ -1226,161 +1226,137 @@ tr:hover td { background: var(--paper-muted); }
 .print-menu-panel label .form-hint { grid-column: 2; margin: 0; }
 .print-menu-panel .btn { align-self: flex-end; }
 
-/* Health Trends print (HealthTrendsPrint.tsx). The printout is laid out in pages by the component, which
-   measures a hidden copy on screen; so these styles apply on screen as well as in print, and the two lay out
-   alike. On screen only the copy being measured is shown, off screen; in print the pages replace the app. */
-.trend-print {
-  color: #1C2333;
-  font-family: var(--font-family);
-  font-size: 10pt;
-  line-height: 1.4;
-  -webkit-print-color-adjust: exact;
-  print-color-adjust: exact;
-}
-
-.trend-print table { width: 100%; border-collapse: collapse; }
-.trend-print th, .trend-print td { background: none !important; }
-
-.trend-print-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 8mm;
-  padding-bottom: 4mm;
-  border-bottom: 1.5pt solid #1C2333;
-  margin-bottom: 5mm;
-}
-.trend-print-header h1 { font-family: var(--font-display); font-size: 17pt; font-weight: 600; margin: 0; }
-.trend-print-tests { margin: 1mm 0 0; color: #4A5068; }
-.trend-print-patient {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 0.5mm 4mm;
-  margin: 0;
-  white-space: nowrap;
-}
-.trend-print-patient dt { color: #7A8094; }
-.trend-print-patient dd { margin: 0; font-weight: 600; }
-
-.trend-print-chart { margin-bottom: 6mm; }
-/* Shrinks, keeping its proportions, rather than pushing the chart off the header's page. */
-.trend-print-chart canvas {
-  display: block;
-  width: auto !important;
-  height: auto !important;
-  max-width: 100%;
-  max-height: 205mm;
-  margin: 0 auto;
-}
-.trend-print-wide .trend-print-chart canvas { max-height: 125mm; }
-.trend-print-legend { display: flex; flex-wrap: wrap; gap: 1.5mm 5mm; margin-top: 2mm; font-size: 9pt; }
-.trend-print i {
-  display: inline-block;
-  width: 8pt;
-  height: 8pt;
-  margin-right: 1.5mm;
-  border-radius: 50%;
-  vertical-align: -0.5pt;
-}
-.trend-print-flag-dot { background: #C62828; }
-.trend-print .trend-print-range-swatch { width: 14pt; height: 7pt; border-radius: 1pt; background: rgba(74, 124, 89, 0.22); }
-
-.trend-print-test h2 {
-  font-size: 11.5pt;
-  font-weight: 600;
-  margin: 0 0 1.5mm;
-  break-after: avoid;
-}
-.trend-print-test h2 span { font-weight: 400; color: #4A5068; }
-.trend-print-table th {
-  padding: 1.2mm 2mm;
-  font-family: var(--font-family);
-  font-size: 8pt;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #4A5068;
-  border-bottom: 1pt solid #1C2333;
-}
-.trend-print-table td {
-  padding: 1.2mm 2mm;
-  font-size: 10pt;
-  color: #1C2333;
-  border-bottom: 0.5pt solid #D5D0C5;
-}
-.trend-print-table th:nth-child(1), .trend-print-table td:nth-child(1) { width: 24%; }
-.trend-print-table th:nth-child(2), .trend-print-table td:nth-child(2) { width: 30%; }
-.trend-print-table th:nth-child(4), .trend-print-table td:nth-child(4) { width: 14%; }
-.trend-print-value { font-family: var(--font-mono); }
-.trend-print-flag { color: #7A8094; }
-.trend-print-flagged td { background: #FDECEA !important; }
-.trend-print-flagged .trend-print-value,
-.trend-print-flagged .trend-print-flag { color: #C62828; font-weight: 700; }
-
-/* One table for every test: a row per date, a column per test. Wider than five tests, it gets a
-   landscape page (the named page below), and its text shrinks to keep ten columns legible. */
-.trend-print-combined th, .trend-print-combined td { width: auto !important; vertical-align: top; }
-.trend-print-combined th { text-transform: none; letter-spacing: 0; font-size: 8.5pt; color: #1C2333; }
-.trend-print-combined th:first-child, .trend-print-combined td:first-child { white-space: nowrap; }
-.trend-print-column-name { display: block; font-weight: 600; }
-.trend-print-column-detail { display: block; font-weight: 400; color: #7A8094; font-size: 7.5pt; }
-.trend-print-combined td { font-size: 9.5pt; }
-.trend-print-wide .trend-print-combined th { font-size: 7.5pt; padding: 1mm 1.2mm; }
-.trend-print-wide .trend-print-combined td { font-size: 8.5pt; padding: 1mm 1.2mm; }
-.trend-print-wide .trend-print-column-detail { font-size: 6.5pt; }
-.trend-print-combined tbody tr:nth-child(even) td { background: #F7F5F0 !important; }
-.trend-print-combined td.trend-print-empty { color: #A8ADBC; }
-/* As specific as the zebra rule above, and after it, so a flagged cell on an even row stays red too. */
-.trend-print-combined tbody tr td.trend-print-flagged-cell { background: #FDECEA !important; color: #C62828; font-weight: 700; }
-.trend-print-cell-range { display: block; font-family: var(--font-family); font-size: 7pt; font-weight: 400; color: #7A8094; }
-
-.trend-print-note { margin: 1.5mm 0 0; font-size: 8.5pt; color: #4A5068; }
-.trend-print-footer {
-  margin-top: 4mm;
-  padding-top: 2mm;
-  border-top: 0.5pt solid #D5D0C5;
-  font-size: 8.5pt;
-  color: #4A5068;
-  break-inside: avoid;
-}
-
-/* A unit is measured whole, margins included, so it holds its children's margins. */
-.trend-print-unit { display: flow-root; }
-/* The gap after each table, measured with its notes. */
-.trend-print-notes, .trend-print-unit > .trend-print-test { padding-bottom: 6mm; }
-.trend-print-continued { font-weight: 400; color: #7A8094; }
-.trend-print-running {
-  display: flex;
-  justify-content: space-between;
-  gap: 6mm;
-  padding-bottom: 1.5mm;
-  margin-bottom: 4mm;
-  border-bottom: 0.5pt solid #A8ADBC;
-  font-size: 8.5pt;
-  color: #4A5068;
-}
-.trend-print-running strong { color: #1C2333; font-weight: 600; }
-.trend-print-running span:last-child { white-space: nowrap; }
-.trend-print-page { margin: 0 auto; }
-
-.trend-print:not(.trend-print-measure) { display: none; }
-.trend-print-measure {
-  position: absolute;
-  top: 0;
-  left: -10000px;
-  visibility: hidden;
-  pointer-events: none;
-}
+/* Health Trends print (HealthTrendsPrint.tsx): hidden on screen; in print it replaces the whole app. */
+.trend-print { display: none; }
 
 @media print {
   /* No page margin leaves the browser no room for its own header and footer (page title, address, date);
-     each laid-out page's padding is its margin instead. */
+     the frame's repeated head and foot give every page its margin instead. */
   @page { margin: 0; }
   @page trend-print-wide { size: landscape; margin: 0; }
 
   html, body { background: #fff !important; }
-  body > *:not(.trend-print-root) { display: none !important; }
-  .trend-print:not(.trend-print-measure) { display: block; }
-  .trend-print-measure { display: none; }
-  .trend-print-page + .trend-print-page { break-before: page; }
-  .trend-print-wide .trend-print-page { page: trend-print-wide; }
+  body > *:not(.trend-print) { display: none !important; }
+
+  .trend-print {
+    display: block;
+    color: #1C2333;
+    font-family: var(--font-family);
+    font-size: 10pt;
+    line-height: 1.4;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .trend-print table { width: 100%; border-collapse: collapse; }
+  .trend-print th, .trend-print td { background: none !important; }
+  .trend-print-frame > thead > tr > td,
+  .trend-print-frame > tfoot > tr > td,
+  .trend-print-frame > tbody > tr > td { padding: 0 14mm; border: 0; font-size: inherit; color: inherit; }
+  .trend-print-space { height: 12mm; }
+
+  .trend-print-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 8mm;
+    padding-bottom: 4mm;
+    border-bottom: 1.5pt solid #1C2333;
+    margin-bottom: 5mm;
+  }
+  .trend-print-header h1 { font-family: var(--font-display); font-size: 17pt; font-weight: 600; margin: 0; }
+  .trend-print-tests { margin: 1mm 0 0; color: #4A5068; }
+  .trend-print-patient {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 0.5mm 4mm;
+    margin: 0;
+    white-space: nowrap;
+  }
+  .trend-print-patient dt { color: #7A8094; }
+  .trend-print-patient dd { margin: 0; font-weight: 600; }
+
+  .trend-print-chart { break-inside: avoid; margin-bottom: 6mm; }
+  /* Shrinks, keeping its proportions, rather than pushing the chart off the header's page. */
+  .trend-print-chart canvas {
+    display: block;
+    width: auto !important;
+    height: auto !important;
+    max-width: 100%;
+    max-height: 205mm;
+    margin: 0 auto;
+  }
+  .trend-print-wide .trend-print-chart canvas { max-height: 125mm; }
+  .trend-print-legend { display: flex; flex-wrap: wrap; gap: 1.5mm 5mm; margin-top: 2mm; font-size: 9pt; }
+  .trend-print i {
+    display: inline-block;
+    width: 8pt;
+    height: 8pt;
+    margin-right: 1.5mm;
+    border-radius: 50%;
+    vertical-align: -0.5pt;
+  }
+  .trend-print-flag-dot { background: #C62828; }
+  .trend-print .trend-print-range-swatch { width: 14pt; height: 7pt; border-radius: 1pt; background: rgba(74, 124, 89, 0.22); }
+
+  .trend-print-test { margin-bottom: 6mm; }
+  .trend-print-test h2 {
+    font-size: 11.5pt;
+    font-weight: 600;
+    margin: 0 0 1.5mm;
+    break-after: avoid;
+  }
+  .trend-print-test h2 span { font-weight: 400; color: #4A5068; }
+  .trend-print-table th {
+    padding: 1.2mm 2mm;
+    font-family: var(--font-family);
+    font-size: 8pt;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #4A5068;
+    border-bottom: 1pt solid #1C2333;
+  }
+  .trend-print-table td {
+    padding: 1.2mm 2mm;
+    font-size: 10pt;
+    color: #1C2333;
+    border-bottom: 0.5pt solid #D5D0C5;
+  }
+  .trend-print-table tr { break-inside: avoid; }
+  .trend-print-table th:nth-child(1), .trend-print-table td:nth-child(1) { width: 24%; }
+  .trend-print-table th:nth-child(2), .trend-print-table td:nth-child(2) { width: 30%; }
+  .trend-print-table th:nth-child(4), .trend-print-table td:nth-child(4) { width: 14%; }
+  .trend-print-value { font-family: var(--font-mono); }
+  .trend-print-flag { color: #7A8094; }
+  .trend-print-flagged td { background: #FDECEA !important; }
+  .trend-print-flagged .trend-print-value,
+  .trend-print-flagged .trend-print-flag { color: #C62828; font-weight: 700; }
+
+  /* One table for every test: a row per date, a column per test. Wider than five tests, it gets a
+     landscape page (the named page below), and its text shrinks to keep ten columns legible. */
+  .trend-print-wide .trend-print-frame { page: trend-print-wide; }
+  .trend-print-combined th, .trend-print-combined td { width: auto !important; vertical-align: top; }
+  .trend-print-combined th { text-transform: none; letter-spacing: 0; font-size: 8.5pt; color: #1C2333; }
+  .trend-print-combined th:first-child, .trend-print-combined td:first-child { white-space: nowrap; }
+  .trend-print-column-name { display: block; font-weight: 600; }
+  .trend-print-column-detail { display: block; font-weight: 400; color: #7A8094; font-size: 7.5pt; }
+  .trend-print-combined td { font-size: 9.5pt; }
+  .trend-print-wide .trend-print-combined th { font-size: 7.5pt; padding: 1mm 1.2mm; }
+  .trend-print-wide .trend-print-combined td { font-size: 8.5pt; padding: 1mm 1.2mm; }
+  .trend-print-wide .trend-print-column-detail { font-size: 6.5pt; }
+  .trend-print-combined tbody tr:nth-child(even) td { background: #F7F5F0 !important; }
+  .trend-print-combined td.trend-print-empty { color: #A8ADBC; }
+  /* As specific as the zebra rule above, and after it, so a flagged cell on an even row stays red too. */
+  .trend-print-combined tbody tr td.trend-print-flagged-cell { background: #FDECEA !important; color: #C62828; font-weight: 700; }
+  .trend-print-cell-range { display: block; font-family: var(--font-family); font-size: 7pt; font-weight: 400; color: #7A8094; }
+
+  .trend-print-note { margin: 1.5mm 0 0; font-size: 8.5pt; color: #4A5068; }
+  .trend-print-footer {
+    margin-top: 4mm;
+    padding-top: 2mm;
+    border-top: 0.5pt solid #D5D0C5;
+    font-size: 8.5pt;
+    color: #4A5068;
+    break-inside: avoid;
+  }
 }
