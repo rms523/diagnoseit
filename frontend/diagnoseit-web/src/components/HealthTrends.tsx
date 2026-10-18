@@ -123,6 +123,11 @@ const HealthTrends: React.FC = () => {
   );
 
   const drawable = useMemo(() => charted.filter(item => item.points.length > 0), [charted]);
+  // Kept stable across renders (a hover re-renders the page), since the print view measures itself when it changes.
+  const printedTrends = useMemo(
+    () => charted.map(item => ({ key: item.pick.key, name: item.pick.name, unit: item.unit, color: item.color, data: item.data })),
+    [charted],
+  );
   const single = charted.length === 1 ? charted[0] : null;
 
   const layout: TrendLayoutMode =
@@ -940,13 +945,7 @@ const HealthTrends: React.FC = () => {
 
       {picks.length > 0 && !waiting && totalPoints > 0 && (
         <HealthTrendsPrint
-          trends={charted.map(item => ({
-            key: item.pick.key,
-            name: item.pick.name,
-            unit: item.unit,
-            color: item.color,
-            data: item.data,
-          }))}
+          trends={printedTrends}
           chartSeries={chartSeries}
           layout={layout}
           scale={scale}

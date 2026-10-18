@@ -17,7 +17,7 @@
  */
 
 import type { HealthTrendPoint } from '../services/api';
-import { parseLabNumeric, parseRefRangeSpan } from './labNumeric';
+import { parseLabNumeric, parseRefRangeSpan, rangeFlag } from './labNumeric';
 
 /**
  * Series colours, in order; they read as distinct lines on the paper palette in this order. None is red,
@@ -34,6 +34,16 @@ export const OUT_OF_RANGE_COLOR = '#C62828';
 /** Statuses that mean the result is outside its reference range. */
 export function isOutOfRange(status: string | undefined | null): boolean {
   return status === 'HIGH' || status === 'LOW' || status === 'ABNORMAL';
+}
+
+/**
+ * How a result reads against its reference range, for the printed copy: from the value and the range
+ * printed beside it wherever both can be read, so the highlight always agrees with the range a reader sees
+ * next to the value, and from the stored status otherwise ("Positive", or no range). The stored status alone
+ * is not enough: it is blank on a result added or corrected after parsing, and stale after an edit.
+ */
+export function resultFlag(point: Pick<HealthTrendPoint, 'value' | 'reference_range' | 'status'>): string {
+  return rangeFlag(point.value, point.reference_range) ?? point.status ?? '';
 }
 
 const AXIS_TEXT = '#7A8094';
@@ -353,6 +363,8 @@ function drawTitle(frame: Frame, series: TrendSeries, x: number, baseline: numbe
 function drawPanel(frame: Frame, panel: Rect, entries: Entry[], scale: TrendScaleMode): ChartPoint[] {
   const { ctx, xScale, fs } = frame;
   const alone = entries.length === 1;
+  // The printed chart reads each point as the printed table does; the screen keeps the stored status.
+  const flagOf = (trend: HealthTrendPoint) => (frame.flagOutOfRange ? resultFlag(trend) : trend.status);
   const statusColor = (status: string) =>
     frame.flagOutOfRange && isOutOfRange(status) ? OUT_OF_RANGE_COLOR : STATUS_COLORS[status];
 
@@ -485,7 +497,8 @@ function drawPanel(frame: Frame, panel: Rect, entries: Entry[], scale: TrendScal
       const px = xScale(point.time);
       const py = y(point.value);
       // On its own panel a point takes its status colour; among other tests it must stay the series' colour.
-      const fill = (alone ? statusColor(point.trend.status) : null) ?? series.color;
+      const flag = flagOf(point.trend);
+      const fill = (alone ? statusColor(flag) : null) ?? series.color;
 
       ctx.beginPath();
       ctx.arc(px, py, outer, 0, Math.PI * 2);
@@ -498,10 +511,10 @@ function drawPanel(frame: Frame, panel: Rect, entries: Entry[], scale: TrendScal
       ctx.fill();
 
       // An out-of-range result keeps a mark of its own where the dot shows which test it belongs to.
-      if (!alone && STATUS_COLORS[point.trend.status] && point.trend.status !== 'NORMAL') {
+      if (!alone && STATUS_COLORS[flag] && flag !== 'NORMAL') {
         ctx.beginPath();
         ctx.arc(px, py, inner + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = statusColor(point.trend.status);
+        ctx.strokeStyle = statusColor(flag);
         ctx.lineWidth = frame.flagOutOfRange ? 2 : 1.5;
         ctx.stroke();
       }
@@ -523,7 +536,7 @@ function drawPanel(frame: Frame, panel: Rect, entries: Entry[], scale: TrendScal
 
     // Labels only where each point has room for one; in small plots they would cover the line.
     const roomy = panel.width / Math.max(1, points.length) >= 36 * fs && panel.height >= 110 * fs;
-    if (alone && frame.valueLabels && roomy) drawValueLabels(frame, panel, placed, statusColor);
+    if (alone && frame.valueLabels && roomy) drawValueLabels(frame, panel, placed, statusColor, flagOf);
     drawn.push(...placed);
   }
 
@@ -539,6 +552,7 @@ function drawValueLabels(
   panel: Rect,
   placed: ChartPoint[],
   statusColor: (status: string) => string | undefined,
+  flagOf: (trend: HealthTrendPoint) => string,
 ): void {
   const { ctx, fs } = frame;
   const size = 10 * fs;
@@ -546,7 +560,8 @@ function drawValueLabels(
   let lastY = 0;
   ctx.textAlign = 'center';
   for (const point of placed) {
-    const flagged = isOutOfRange(point.trend.status);
+    const flag = flagOf(point.trend);
+    const flagged = isOutOfRange(flag);
     ctx.font = font(fs, 10, 'mono', flagged ? 600 : 400);
     const text = point.trend.value;
     const half = ctx.measureText(text).width / 2;
@@ -554,7 +569,7 @@ function drawValueLabels(
     const y = above - size < panel.top ? point.y + 10 * fs + size : above;
     // Labels at different heights can sit closer together than labels on one line.
     if (point.x - half < lastRight + 3 * fs && Math.abs(y - lastY) < size * 1.2) continue;
-    ctx.fillStyle = flagged && frame.flagOutOfRange ? statusColor(point.trend.status) ?? VALUE_TEXT : VALUE_TEXT;
+    ctx.fillStyle = flagged && frame.flagOutOfRange ? statusColor(flag) ?? VALUE_TEXT : VALUE_TEXT;
     ctx.fillText(text, point.x, y);
     lastRight = point.x + half;
     lastY = y;

@@ -84,6 +84,34 @@ export function parseRefRangeSpan(ref: string | undefined | null): { min: number
   return null;
 }
 
+/**
+ * Where a value falls against the reference range printed beside it: 'LOW', 'HIGH', or 'NORMAL', or null
+ * when either cannot be read. Follows the parser's rules (utils/enhanced_pdf_parser.py,
+ * _status_from_ref_string): a two-sided range first, then "<x" (x or more is high), then ">x" (x or less
+ * is low).
+ */
+export function rangeFlag(
+  value: string | undefined | null,
+  ref: string | undefined | null,
+): 'LOW' | 'HIGH' | 'NORMAL' | null {
+  const number = parseLabNumeric(value);
+  if (number === null || !ref?.trim()) return null;
+  const span = parseRefRangeSpan(ref);
+  if (span) return number < span.min ? 'LOW' : number > span.max ? 'HIGH' : 'NORMAL';
+  const range = ref.replace(/≤/g, '<').replace(/≥/g, '>');
+  const below = range.match(/<\s*=?\s*([\d.,]+)/);
+  if (below) {
+    const limit = parseNumericFragment(below[1]);
+    if (limit !== null) return number >= limit ? 'HIGH' : 'NORMAL';
+  }
+  const above = range.match(/>\s*=?\s*([\d.,]+)/);
+  if (above) {
+    const limit = parseNumericFragment(above[1]);
+    if (limit !== null) return number <= limit ? 'LOW' : 'NORMAL';
+  }
+  return null;
+}
+
 /** An axis label with enough decimals for the span it sits in, and no more. */
 export function formatAxisTick(v: number, span: number): string {
   if (!Number.isFinite(v)) return '';
