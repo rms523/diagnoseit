@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable
 from datetime import timedelta
 from typing import Any
 
@@ -49,10 +50,63 @@ def auto_review_enabled() -> bool:
     return config.is_configured and config.auto_review
 
 
-def result_identity(test_name: str, value: str, catalog: TestNameMatcher) -> tuple[object, str]:
-    """Results are the same when their names resolve to one catalog test (or match as typed) and their values match."""
-    test_type = catalog.match(test_name)
-    return (test_type.pk if test_type else normalize_test_identifier(test_name), str(value or '').strip())
+class KnownTests:
+    """The tests a report already has a result for, so a suggested add of one is never offered or applied.
+
+    A model lists a result as missing when it reads the row differently from how it is stored: "Eosinophils
+    (DLC)" for the "Eosinophils" the parser read in the differential count, "Negative, 2.61" for
+    "Negative,2.61", or a value misread from a page image (an RBC Count of 1.67 beside the printed 4.87).
+    So values are not compared. A result is known by the catalog test its row is linked to, as stored (the
+    parser links with the row's section and unit, which its name alone may not carry), and by its printed
+    name. A row that is wrong is corrected with an update, never repeated with an add.
+    """
+
+    def __init__(self, catalog: TestNameMatcher, results: Iterable[Any] = ()):
+        self.catalog = catalog
+        self._test_type_ids: set[int] = set()
+        # Each printed name, with the catalog tests its rows are linked to (None for an unlinked row).
+        self._names: dict[str, set[int | None]] = {}
+        for result in results:
+            self.add_row(result)
+
+    def link(self, result: dict[str, Any]) -> LabTestType | None:
+        """The catalog test a suggested result would be linked to when added."""
+        return self.catalog.match(result.get('test_name'), unit=result.get('unit') or None, value=result.get('value'))
+
+    def add_row(self, result: Any) -> None:
+        """Record a stored result (a TestResult, or a row dict that may carry test_type_id)."""
+        if isinstance(result, dict):
+            test_name, test_type_id = result.get('test_name'), result.get('test_type_id')
+            unit, value = result.get('unit'), result.get('value')
+        else:
+            test_name, test_type_id, unit, value = result.test_name, result.test_type_id, result.unit, result.value
+        if test_type_id is None:
+            # A row stored before the catalog knew its test is known by the test its name now matches.
+            current = self.catalog.match(test_name, unit=unit or None, value=value)
+            test_type_id = current.pk if current else None
+        self._remember(test_name, test_type_id)
+
+    def add_suggested(self, result: dict[str, Any]) -> None:
+        """Record a suggested add, so a later part of the same review does not suggest it again."""
+        test_type = self.link(result)
+        self._remember(result.get('test_name'), test_type.pk if test_type else None)
+
+    def covers(self, result: dict[str, Any]) -> bool:
+        """Whether a suggested add names a test the report already has, whatever value it gives."""
+        test_type = self.link(result)
+        if test_type is not None and test_type.pk in self._test_type_ids:
+            return True
+        links = self._names.get(normalize_test_identifier(result.get('test_name')))
+        # A printed name already in the report is that result, unless the add links it to another test:
+        # "Eosinophils" in thou/mm3 is the absolute count, not the differential row printed in %.
+        return links is not None and (test_type is None or None in links)
+
+    def _remember(self, test_name: Any, test_type_id: int | None) -> None:
+        if test_type_id is not None:
+            self._test_type_ids.add(test_type_id)
+        name = normalize_test_identifier(test_name)
+        if name:
+            self._names.setdefault(name, set()).add(test_type_id)
 
 
 def pending_review(options: dict[str, bool] | None = None) -> dict[str, Any]:
@@ -298,7 +352,7 @@ def _apply(report: MedicalReport, suggestion_ids: list[int], automatic: bool) ->
         return []
     results = {result.id: result for result in TestResult.objects.select_for_update().filter(report=report)}
     catalog = build_test_type_matcher(report.user_id)
-    existing = {result_identity(result.test_name, result.value, catalog) for result in results.values()}
+    known = KnownTests(catalog, results.values())
     applied_at = timezone.now().isoformat()
     kept: list[Any] = []
     applied: list[dict[str, Any]] = list(review.get('applied') or [])
@@ -306,7 +360,7 @@ def _apply(report: MedicalReport, suggestion_ids: list[int], automatic: bool) ->
 
     for item in review.get('suggestions') or []:
         wanted_item = isinstance(item, dict) and item.get('id') in wanted
-        open_item = _still_open(item, results, existing, catalog) if wanted_item else None
+        open_item = _still_open(item, results, known) if wanted_item else None
         if open_item is None:
             kept.append(item)
             continue
@@ -322,6 +376,8 @@ def _apply(report: MedicalReport, suggestion_ids: list[int], automatic: bool) ->
             row = results.pop(item['result_id'])
             record.update(result=_snapshot(row), test_type_id=row.test_type_id)
             row.delete()
+            # Once a row is gone, an add of its test is no longer a repeat of it.
+            known = KnownTests(catalog, results.values())
         elif item['action'] == 'update':
             row = results[item['result_id']]
             changes = open_item['changes']
@@ -331,16 +387,16 @@ def _apply(report: MedicalReport, suggestion_ids: list[int], automatic: bool) ->
             if changes.keys() & {'test_name', 'value'}:
                 row.test_type = catalog.match(row.test_name, value=row.value)
             row.save()
-            existing.add(result_identity(row.test_name, row.value, catalog))
+            known = KnownTests(catalog, results.values())
         else:
             values = open_item['result']
             row = TestResult.objects.create(
                 report=report,
-                test_type=catalog.match(values.get('test_name'), value=values.get('value')),
+                test_type=known.link(values),
                 **{name: values.get(name) or '' for name in RESULT_FIELDS if name != 'notes'},
             )
             results[row.id] = row
-            existing.add(result_identity(row.test_name, row.value, catalog))
+            known.add_row(row)
             record.update(result_id=row.id, result=_snapshot(row))
         applied.append(record)
         applied_ids.append(item['id'])
@@ -365,8 +421,8 @@ def _expired(review: dict[str, Any]) -> bool:
 def _open_suggestions(report: MedicalReport, review: dict[str, Any], catalog: TestNameMatcher) -> list[dict[str, Any]]:
     """Stored suggestions the report's current results do not already match."""
     results = {result.id: result for result in report.test_results.all()}
-    existing = {result_identity(result.test_name, result.value, catalog) for result in results.values()}
-    open_items = (_still_open(item, results, existing, catalog) for item in review.get('suggestions') or [])
+    known = KnownTests(catalog, results.values())
+    open_items = (_still_open(item, results, known) for item in review.get('suggestions') or [])
     return [item for item in open_items if item]
 
 
@@ -378,13 +434,13 @@ def _snapshot(row: TestResult) -> dict[str, str]:
     return {name: _value(row, name) for name in RESULT_FIELDS}
 
 
-def _still_open(item: Any, results: dict, existing: set, catalog: TestNameMatcher) -> dict[str, Any] | None:
+def _still_open(item: Any, results: dict, known: KnownTests) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
     action = item.get('action')
     if action == 'add':
-        result = item.get('result') or {}
-        return None if result_identity(result.get('test_name', ''), result.get('value', ''), catalog) in existing else item
+        # Also hides adds stored by reviews from before this check, for tests the report already has.
+        return None if known.covers(item.get('result') or {}) else item
 
     row = results.get(item.get('result_id'))
     if row is None:

@@ -26,7 +26,7 @@ from ai_settings.client import chat_json, parse_json_object
 from ai_settings.services import DEFAULT_TEMPERATURES, ROLE_REPORT_REVIEW, AIConfig
 from lab_tests.models import LabTestType
 from lab_tests.services import build_test_type_matcher, normalize_test_identifier
-from medical_reports.ai_review import COMPLETED, result_identity
+from medical_reports.ai_review import COMPLETED, KnownTests
 from medical_reports.tasks import normalize_test_status
 from utils.pdf_text_normalize import normalize_pdf_page_lines
 from utils.report_redaction import PreparedText, prepare_report_text, redact_page_image
@@ -69,6 +69,7 @@ Otherwise use "needs_changes" and list each problem as one of:
   Include only the fields that change.
 - {{"action": "add", "test_name": "...", "value": "...", "unit": "...", "reference_range": "...", "status": "...", "reason": "..."}}
   for a result printed in the report but missing from the rows. Use the catalog name when one matches the printed test.
+  Never add a test that already has a row: when its row has the wrong value, unit, or name, update that row instead.
 - {{"action": "remove", "result_id": <id>, "reason": "..."}}
   for a row that is not a test result (reference bands, headers, interpretation or method text) or is a duplicate.
 
@@ -123,6 +124,7 @@ def review_report(report, config: AIConfig, *, ocr: bool = False, images: bool =
     except (OSError, ValueError) as exc:
         raise ReportReviewError('The original report file could not be read.') from exc
 
+    results = list(report.test_results.order_by('id'))
     rows = [
         {
             'id': result.id,
@@ -132,7 +134,7 @@ def review_report(report, config: AIConfig, *, ocr: bool = False, images: bool =
             'reference_range': result.reference_range or '',
             'status': result.status or '',
         }
-        for result in report.test_results.order_by('id')
+        for result in results
     ]
     page_lines = _ocr_page_lines(pdf_bytes) if ocr else _extract_page_lines(pdf_bytes)
     lines = [line for page in page_lines for line in page]
@@ -210,15 +212,15 @@ def review_report(report, config: AIConfig, *, ocr: bool = False, images: bool =
         def printed_at(row_id: int) -> int | None:
             return locations[row_id].page
 
-    catalog_matcher = build_test_type_matcher(report.user_id)
-    seen = {result_identity(row['test_name'], row['value'], catalog_matcher) for row in rows}
+    # The stored rows with their catalog links, and every add suggested so far, so no part repeats either.
+    known = KnownTests(build_test_type_matcher(report.user_id), results)
     summaries: list[str] = []
     suggestions: list[dict[str, Any]] = []
     failed_parts: list[dict[str, Any]] = []
     for number, part in enumerate(parts, start=1):
         content, printed, first_page, last_page, window = build_request(number, part)
         try:
-            summary, part_suggestions = _review_part(report, config, content, part.rows, seen, printed)
+            summary, part_suggestions = _review_part(report, config, content, part.rows, known, printed)
         except ReportReviewError as exc:
             failed_parts.append({'part': number, 'first_page': first_page, 'last_page': last_page, 'error': str(exc)})
             continue
@@ -339,12 +341,13 @@ def locate_rows(
 def clean_suggestions(
     raw: Any,
     rows: list[dict[str, Any]],
-    seen: set[tuple[object, str]] | None = None,
+    known: KnownTests | None = None,
     printed_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Keep well-formed suggestions about these rows, trimmed to the model's field limits.
 
-    seen holds results already in the report or suggested by earlier parts; adds matching one are dropped.
+    known holds the tests the report already has and those added by earlier parts; an add of one of them is
+    dropped whatever its value (see KnownTests), and adds kept here join it.
     Changes that only differ in capitals, spacing, or punctuation, renames to another name of the same
     catalog test, and cleared statuses are dropped. When printed_text (the report text the model was
     shown) is given, a suggested value it does not contain is dropped with its suggestion.
@@ -353,8 +356,8 @@ def clean_suggestions(
         return []
     rows_by_id = {row['id']: row for row in rows}
     catalog = build_test_type_matcher()
-    if seen is None:
-        seen = {result_identity(row['test_name'], row['value'], catalog) for row in rows}
+    if known is None:
+        known = KnownTests(catalog, rows)
 
     def catalog_name(test_name: str) -> str | None:
         test_type = catalog.match(test_name)
@@ -400,31 +403,29 @@ def clean_suggestions(
                 cleaned.append(suggestion)
 
         elif action == 'add':
-            test_name = _text(item.get('test_name'), FIELD_LIMITS['test_name'])
-            value = _text(item.get('value'), FIELD_LIMITS['value'])
-            identity = result_identity(test_name, value, catalog)
-            if not test_name or not value or identity in seen:
+            result = {
+                'test_name': _text(item.get('test_name'), FIELD_LIMITS['test_name']),
+                'value': _text(item.get('value'), FIELD_LIMITS['value']),
+                'unit': _text(item.get('unit'), FIELD_LIMITS['unit']),
+                'reference_range': _text(item.get('reference_range'), FIELD_LIMITS['reference_range']),
+                'status': _status(item.get('status')),
+            }
+            if not result['test_name'] or not result['value'] or known.covers(result):
                 continue
-            if printed_text is not None and not _is_printed(value, printed_text):
+            if printed_text is not None and not _is_printed(result['value'], printed_text):
                 continue
-            seen.add(identity)
+            known.add_suggested(result)
             cleaned.append({
                 'action': 'add',
-                'result': {
-                    'test_name': test_name,
-                    'value': value,
-                    'unit': _text(item.get('unit'), FIELD_LIMITS['unit']),
-                    'reference_range': _text(item.get('reference_range'), FIELD_LIMITS['reference_range']),
-                    'status': _status(item.get('status')),
-                },
-                'catalog_name': catalog_name(test_name),
+                'result': result,
+                'catalog_name': catalog_name(result['test_name']),
                 'reason': reason,
             })
     return cleaned
 
 
 def _review_part(
-    report, config: AIConfig, content: Any, rows: list[dict[str, Any]], seen, printed_text: str | None
+    report, config: AIConfig, content: Any, rows: list[dict[str, Any]], known: KnownTests, printed_text: str | None
 ) -> tuple[str, list]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
     temperature = config.temperature_or(DEFAULT_TEMPERATURES[ROLE_REPORT_REVIEW])
@@ -441,7 +442,7 @@ def _review_part(
     # A "correct" verdict means the model found nothing to change, whatever else the reply lists.
     if str(payload.get('verdict') or '').strip().lower() == 'correct':
         return summary, []
-    return summary, clean_suggestions(payload.get('suggestions'), rows, seen, printed_text)
+    return summary, clean_suggestions(payload.get('suggestions'), rows, known, printed_text)
 
 
 def _instructions(rows: list[dict[str, Any]], catalog: str) -> str:

@@ -343,6 +343,83 @@ class ReportAIReviewTests(TestCase):
         )
         self.assertEqual(mock_chat.call_args.kwargs["temperature"], 0.7)
 
+    def _blood_count_catalog(self):
+        return (
+            LabTestType.objects.create(name="dlc_eosinophils", display_name="Eosinophils (DLC)", default_unit="percent"),
+            LabTestType.objects.create(name="alc_eosinophils", display_name="Eosinophils (ALC)", default_unit="thou_mm3"),
+            LabTestType.objects.create(name="rbc", display_name="Red Blood Cell Count", default_unit="mill_mm3", aliases=["rbc count"]),
+        )
+
+    @patch("utils.report_review.chat_json")
+    def test_adds_for_tests_the_report_already_has_are_dropped_whatever_their_value(self, mock_chat):
+        self._configure()
+        dlc, alc, rbc = self._blood_count_catalog()
+        # The parser linked "Eosinophils" through its section; the name alone names no one test.
+        eosinophils = TestResult.objects.create(report=self.report, test_name="Eosinophils", value="15.40", unit="%", test_type=dlc)
+        TestResult.objects.create(report=self.report, test_name="RBC Count", value="4.87", unit="mill/mm3", test_type=rbc)
+        TestResult.objects.create(report=self.report, test_name="Beta-2-Glycoprotein 1-IgG", value="Negative,2.61")
+        pages = [[
+            "Differential Leucocyte Count (DLC)",
+            "Eosinophils 15.40 % 1.00 - 6.00",
+            "Absolute Leucocyte Count",
+            "Eosinophils 0.07 thou/mm3 0.02 - 0.50",
+            "RBC Count 4.87 mill/mm3 4.50 - 5.50",
+            "MCH 31.67 pg",
+            "Beta-2-Glycoprotein 1-IgG Negative, 2.61",
+        ]]
+        mock_chat.return_value = json.dumps({"verdict": "needs_changes", "suggestions": [
+            {"action": "add", "test_name": "Eosinophils (DLC)", "value": "15.4", "unit": "%", "reason": "Missing"},
+            # A value misread from the page is printed nowhere; one that is printed is still not a missing result.
+            {"action": "add", "test_name": "Red Blood Cell Count", "value": "31.67", "unit": "mill/mm3", "reason": "Missing"},
+            {"action": "add", "test_name": "Beta-2-Glycoprotein 1-IgG", "value": "Negative, 2.61", "reason": "Missing"},
+            {"action": "add", "test_name": "Eosinophils (ALC)", "value": "0.07", "unit": "thou/mm3", "reason": "Missing"},
+            {"action": "add", "test_name": "Eosinophils", "value": "0.07", "unit": "thou/mm3", "reason": "Missing again"},
+        ]})
+
+        with patch("utils.report_review._extract_page_lines", return_value=pages):
+            review = self._review()
+
+        self.assertEqual(
+            [(item["result"]["test_name"], item["result"]["value"]) for item in review["suggestions"]],
+            [("Eosinophils (ALC)", "0.07")],
+        )
+        self.assertEqual(review["suggestions"][0]["catalog_name"], alc.display_name)
+        self.assertIn("Never add a test that already has a row", mock_chat.call_args.args[1][1]["content"])
+        self.assertEqual(TestResult.objects.filter(report=self.report, test_type=dlc).get(), eosinophils)
+
+    @patch("medical_reports.tasks.review_report_task.apply_async")
+    def test_stored_adds_for_tests_already_in_the_report_are_hidden_and_never_applied(self, _delay):
+        dlc, alc, rbc = self._blood_count_catalog()
+        TestResult.objects.create(report=self.report, test_name="Eosinophils", value="15.40", unit="%", test_type=dlc)
+        red_cells = TestResult.objects.create(report=self.report, test_name="RBC Count", value="1.67", unit="mill/mm3", test_type=rbc)
+
+        def add(test_name, value, unit=""):
+            return {"test_name": test_name, "value": value, "unit": unit, "reference_range": "", "status": ""}
+
+        # Stored by a review from before adds were checked against the rows' catalog links.
+        self._store_review([
+            {"id": 1, "action": "add", "result": add("Eosinophils (DLC)", "15.4", "%"), "catalog_name": None, "reason": ""},
+            {"id": 2, "action": "add", "result": add("Eosinophils", "0.07", "thou/mm3"), "catalog_name": None, "reason": ""},
+            {"id": 3, "action": "remove", "result_id": red_cells.id, "reason": "Misread"},
+            {"id": 4, "action": "add", "result": add("Red Blood Cell Count", "4.87", "mill/mm3"), "catalog_name": None, "reason": ""},
+        ])
+
+        review = self.client.get(self.detail_url).data["ai_review"]
+        self.assertEqual([item["id"] for item in review["suggestions"]], [2, 3])
+
+        response = self.client.post(f"{self.url}accept/", {"ids": [1, 2]}, format="json")
+        self.assertEqual(response.data["applied"], [2])
+        # A unit can say which count a bare name is, so the added row is linked the way the check read it.
+        self.assertEqual(TestResult.objects.get(report=self.report, test_name="Eosinophils", unit="thou/mm3").test_type, alc)
+        self.assertEqual(TestResult.objects.filter(report=self.report, test_type=dlc).count(), 1)
+
+        # Once the misread row is removed, adding the test it held is no longer a repeat.
+        self.client.post(f"{self.url}accept/", {"ids": [3]}, format="json")
+        review = self.client.get(self.detail_url).data["ai_review"]
+        self.assertEqual([item["id"] for item in review["suggestions"]], [4])
+        self.assertEqual(self.client.post(f"{self.url}accept/", {"ids": [4]}, format="json").data["applied"], [4])
+        self.assertEqual(TestResult.objects.get(report=self.report, test_type=rbc).value, "4.87")
+
     @patch("utils.report_review._extract_page_lines", return_value=REPORT_PAGES)
     @patch("utils.report_review.chat_json")
     def test_dismissed_suggestions_are_not_shown_again_by_later_reviews(self, mock_chat, _lines):
