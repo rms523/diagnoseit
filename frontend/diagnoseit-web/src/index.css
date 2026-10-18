@@ -442,6 +442,7 @@ h1, h2, h3, h4, h5, h6 {
 .alert-error { background: var(--coral-dim); color: var(--coral); border: 1px solid rgba(196, 92, 74, 0.2); }
 .alert-success { background: var(--sage-dim); color: var(--sage); border: 1px solid rgba(74, 124, 89, 0.2); }
 .alert-info { background: var(--teal-dim); color: var(--teal); border: 1px solid rgba(42, 123, 126, 0.2); }
+.alert-warning { background: var(--amber-dim); color: var(--text-primary); border: 1px solid rgba(184, 134, 11, 0.3); }
 
 /* Modal */
 .modal-overlay {

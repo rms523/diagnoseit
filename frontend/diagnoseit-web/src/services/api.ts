@@ -91,10 +91,20 @@ export interface ReportStatusResponse {
   ai_review_status?: '' | 'pending' | 'completed' | 'failed';
 }
 
+/** A report of the user's whose file an upload repeats. */
+export interface DuplicateReport {
+  id: number;
+  title: string;
+  report_date: string;
+  created_at: string;
+}
+
 export interface BulkUploadResult {
   total: number;
   created: number;
+  /** Files not uploaded, including those already uploaded (counted again in duplicates). */
   errors: number;
+  duplicates?: number;
   reports: Array<{
     id: number;
     title: string;
@@ -102,7 +112,7 @@ export interface BulkUploadResult {
     status: string;
     is_parsed: boolean;
   }>;
-  error_details: Array<{ file: string; error: string }>;
+  error_details: Array<{ file: string; error: string; duplicate_of?: DuplicateReport }>;
 }
 
 export interface LabTestTypeUnit {
@@ -750,7 +760,8 @@ class ApiService {
     lab_name?: string,
     report_date?: string,
     notes?: string,
-    aiReview?: boolean
+    aiReview?: boolean,
+    allowDuplicate?: boolean
   ): Promise<MedicalReport> {
     const formData = new FormData();
     formData.append('file', file);
@@ -760,6 +771,7 @@ class ApiService {
     if (report_date) formData.append('report_date', report_date);
     if (notes) formData.append('notes', notes);
     if (aiReview !== undefined) formData.append('ai_review', String(aiReview));
+    if (allowDuplicate) formData.append('allow_duplicate', 'true');
 
     return this.request<MedicalReport>('/medical-reports/reports/', {
       method: 'POST',
@@ -768,10 +780,12 @@ class ApiService {
   }
 
   /** aiReview reviews each parsed file with AI; leave it undefined to follow AI settings. */
-  async bulkUploadMedicalReports(files: File[], aiReview?: boolean): Promise<BulkUploadResult> {
+  /** allowDuplicate uploads files already uploaded instead of skipping them. */
+  async bulkUploadMedicalReports(files: File[], aiReview?: boolean, allowDuplicate?: boolean): Promise<BulkUploadResult> {
     const formData = new FormData();
     files.forEach(file => formData.append('files', file));
     if (aiReview !== undefined) formData.append('ai_review', String(aiReview));
+    if (allowDuplicate) formData.append('allow_duplicate', 'true');
     return this.request<BulkUploadResult>('/medical-reports/reports/bulk-upload/', {
       method: 'POST',
       body: formData,

@@ -772,7 +772,8 @@ class ReportAIReviewTests(TestCase):
     @patch("medical_reports.tasks.parse_report_task.delay")
     def test_upload_forms_pass_their_ai_review_choice_to_parsing(self, mock_parse_delay):
         def pdf(name):
-            return SimpleUploadedFile(name, b"%PDF-1.4 fake", content_type="application/pdf")
+            # Content differs per name: an upload of the same bytes again is refused as already uploaded.
+            return SimpleUploadedFile(name, b"%PDF-1.4 fake " + name.encode(), content_type="application/pdf")
 
         with self.captureOnCommitCallbacks(execute=True):
             bulk = self.client.post(

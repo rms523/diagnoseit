@@ -18,7 +18,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import type { BulkUploadResult } from '../services/api';
 import { apiService } from '../services/api';
-import { theme } from '../theme/theme';
+import { theme, tokens } from '../theme/theme';
+import { duplicateUploadOf } from '../utils/apiErrors';
 
 type PickedAsset = DocumentPicker.DocumentPickerAsset;
 type UploadMode = 'single' | 'bulk';
@@ -32,6 +33,16 @@ const REPORT_TYPES = [
   { value: 'CT', label: 'CT Scan' },
   { value: 'OTHER', label: 'Other' },
 ];
+
+/** The picked files of a batch the API skipped as already uploaded, so they can be sent again on request. */
+function skippedFiles(batch: PickedAsset[], result: BulkUploadResult | null): PickedAsset[] {
+  const names = (result?.error_details ?? []).filter(item => item.duplicate_of).map(item => item.file);
+  const remaining = [...batch];
+  return names.flatMap(name => {
+    const index = remaining.findIndex(asset => (asset.name || 'report.pdf') === name);
+    return index === -1 ? [] : remaining.splice(index, 1);
+  });
+}
 
 function toUploadFile(asset: PickedAsset) {
   return {
@@ -54,6 +65,8 @@ export default function UploadReportScreen({ navigation, route }: any) {
   const [selectedFiles, setSelectedFiles] = useState<PickedAsset[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [bulkResults, setBulkResults] = useState<BulkUploadResult | null>(null);
+  // The files of the last bulk upload, so those skipped as already uploaded can be sent anyway.
+  const [lastBatch, setLastBatch] = useState<PickedAsset[]>([]);
 
   const switchMode = (next: UploadMode) => {
     setMode(next);
@@ -114,8 +127,8 @@ export default function UploadReportScreen({ navigation, route }: any) {
     return true;
   };
 
-  const uploadReport = async () => {
-    if (!validateForm()) return;
+  const uploadReport = async (allowDuplicate = false, batch?: PickedAsset[]) => {
+    if (!batch && !validateForm()) return;
 
     setIsUploading(true);
     setBulkResults(null);
@@ -129,6 +142,7 @@ export default function UploadReportScreen({ navigation, route }: any) {
           formData.lab_name || undefined,
           formData.report_date,
           formData.notes || undefined,
+          allowDuplicate,
         );
 
         Alert.alert(
@@ -145,18 +159,33 @@ export default function UploadReportScreen({ navigation, route }: any) {
         return;
       }
 
-      const result = await apiService.bulkUploadMedicalReports(
-        selectedFiles.map(toUploadFile),
-      );
+      const files = batch ?? selectedFiles;
+      const result = await apiService.bulkUploadMedicalReports(files.map(toUploadFile), allowDuplicate);
       setBulkResults(result);
+      setLastBatch(files);
       setSelectedFiles([]);
 
-      const msg = result.errors === 0
-        ? `All ${result.created} reports uploaded`
-        : `${result.created} uploaded, ${result.errors} failed`;
-
-      Alert.alert('Bulk upload complete', msg);
+      const skipped = result.error_details.filter(item => item.duplicate_of).length;
+      const failed = result.errors - skipped;
+      const parts = [`${result.created} uploaded`];
+      if (skipped > 0) parts.push(`${skipped} already uploaded`);
+      if (failed > 0) parts.push(`${failed} failed`);
+      Alert.alert('Bulk upload complete', result.errors === 0 ? `All ${result.created} reports uploaded` : parts.join(', '));
     } catch (error: unknown) {
+      const repeated = duplicateUploadOf(error);
+      if (repeated) {
+        Alert.alert(
+          'Already uploaded',
+          `This file is already uploaded as "${repeated.title}" (report date ${repeated.report_date}). `
+            + 'Uploading it again shows each of its results twice on Health Trends.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open it', onPress: () => navigation.replace('ReportDetail', { reportId: repeated.id }) },
+            { text: 'Upload anyway', onPress: () => uploadReport(true) },
+          ],
+        );
+        return;
+      }
       const msg = error instanceof Error
         ? error.message.replace(/^API Error: \d+ \w+ - /, '')
         : 'Upload failed';
@@ -165,6 +194,8 @@ export default function UploadReportScreen({ navigation, route }: any) {
       setIsUploading(false);
     }
   };
+
+  const skippedCount = bulkResults?.error_details.filter(item => item.duplicate_of).length ?? 0;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -285,18 +316,44 @@ export default function UploadReportScreen({ navigation, route }: any) {
                 <Text style={styles.sectionTitle}>Upload summary</Text>
                 <View style={styles.summaryChips}>
                   <Chip style={styles.successChip}>{bulkResults.created} created</Chip>
-                  {bulkResults.errors > 0 && (
-                    <Chip style={styles.errorChip}>{bulkResults.errors} failed</Chip>
+                  {skippedCount > 0 && (
+                    <Chip style={styles.duplicateChip}>{skippedCount} already uploaded</Chip>
+                  )}
+                  {bulkResults.errors - skippedCount > 0 && (
+                    <Chip style={styles.errorChip}>{bulkResults.errors - skippedCount} failed</Chip>
                   )}
                   <Chip>{bulkResults.total} total</Chip>
                 </View>
-                {bulkResults.error_details.length > 0 && (
+                {bulkResults.error_details.some(err => !err.duplicate_of) && (
                   <View style={styles.errorList}>
-                    {bulkResults.error_details.map((err, i) => (
+                    {bulkResults.error_details.filter(err => !err.duplicate_of).map((err, i) => (
                       <Text key={i} style={styles.errorLine}>
                         {err.file}: {err.error}
                       </Text>
                     ))}
+                  </View>
+                )}
+                {skippedCount > 0 && (
+                  <View style={styles.errorList}>
+                    <Text style={styles.duplicateIntro}>Skipped, because the same file is already uploaded:</Text>
+                    {bulkResults.error_details.filter(err => err.duplicate_of).map((err, i) => (
+                      <Text
+                        key={i}
+                        style={styles.duplicateLine}
+                        onPress={() => navigation.navigate('ReportDetail', { reportId: err.duplicate_of!.id })}
+                      >
+                        {err.file}: already uploaded as {err.duplicate_of!.title} ({err.duplicate_of!.report_date})
+                      </Text>
+                    ))}
+                    <Button
+                      mode="outlined"
+                      compact
+                      style={styles.duplicateButton}
+                      disabled={isUploading || skippedFiles(lastBatch, bulkResults).length === 0}
+                      onPress={() => uploadReport(true, skippedFiles(lastBatch, bulkResults))}
+                    >
+                      {skippedCount === 1 ? 'Upload it anyway' : 'Upload them anyway'}
+                    </Button>
                   </View>
                 )}
               </View>
@@ -304,7 +361,7 @@ export default function UploadReportScreen({ navigation, route }: any) {
 
             <Button
               mode="contained"
-              onPress={uploadReport}
+              onPress={() => uploadReport()}
               style={styles.uploadButton}
               contentStyle={styles.buttonContent}
               disabled={isUploading || (mode === 'bulk' ? selectedFiles.length === 0 : !selectedFile)}
@@ -381,6 +438,10 @@ const styles = StyleSheet.create({
   errorChip: { backgroundColor: theme.colors.error },
   errorList: { marginTop: 8 },
   errorLine: { fontSize: 12, color: theme.colors.error, marginBottom: 4 },
+  duplicateChip: { backgroundColor: tokens.amberDim },
+  duplicateIntro: { fontSize: 12, color: theme.colors.onSurfaceVariant, marginBottom: 4 },
+  duplicateLine: { fontSize: 12, color: theme.colors.onSurface, marginBottom: 4, textDecorationLine: 'underline' },
+  duplicateButton: { alignSelf: 'flex-start', marginTop: 4 },
   uploadButton: { marginTop: 8, borderRadius: 8 },
   buttonContent: { paddingVertical: 8 },
 });

@@ -2,11 +2,11 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { useToast } from '../contexts/ToastContext';
-import { apiErrorMessage } from '../utils/apiErrors';
+import { apiErrorMessage, duplicateUploadOf } from '../utils/apiErrors';
 import { IconClose, IconReports, IconSearch, IconTrash } from './Icons';
 import { saveListSort, saveReportListView, savedListSort } from '../utils/reportList';
 import TestResultSearch from './TestResultSearch';
-import type { BulkUploadResult, MedicalReport } from '../services/api';
+import type { BulkUploadResult, DuplicateReport, MedicalReport } from '../services/api';
 import { parseDateInput, todayIsoDate } from '../utils/dates';
 import {
   aiReviewBadge,
@@ -495,6 +495,24 @@ const MedicalReports: React.FC = () => {
   );
 };
 
+/** "14 May 2026", for naming the report an upload repeats. */
+function reportDateLabel(isoDate: string): string {
+  const date = new Date(`${isoDate}T00:00:00`);
+  return Number.isNaN(date.getTime())
+    ? isoDate
+    : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+/** The files of a batch the API skipped as already uploaded, so they can be sent again on request. */
+function skippedFiles(batch: File[], result: BulkUploadResult | null): File[] {
+  const names = (result?.error_details ?? []).filter(item => item.duplicate_of).map(item => item.file);
+  const remaining = [...batch];
+  return names.flatMap(name => {
+    const index = remaining.findIndex(file => file.name === name);
+    return index === -1 ? [] : remaining.splice(index, 1);
+  });
+}
+
 interface UploadModalProps {
   onClose: () => void;
   onSuccess: (report: MedicalReport) => void;
@@ -520,6 +538,10 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [bulkResults, setBulkResults] = useState<BulkUploadResult | null>(null);
+  // The report a single upload's file repeats, while the user decides whether to upload it anyway.
+  const [duplicate, setDuplicate] = useState<DuplicateReport | null>(null);
+  // The files of the last bulk upload, so those skipped as already uploaded can be sent anyway.
+  const [lastBatch, setLastBatch] = useState<File[]>([]);
   const [reviewAvailable, setReviewAvailable] = useState(false);
   const [aiReview, setAiReview] = useState(false);
 
@@ -549,6 +571,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
     setFile(null);
     setFiles([]);
     setBulkResults(null);
+    setDuplicate(null);
     setError('');
   };
 
@@ -558,6 +581,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
     const dropped = Array.from(e.dataTransfer.files ?? []);
     if (mode === 'single' && dropped[0]) {
       setFile(dropped[0]);
+      setDuplicate(null);
       if (!form.title) {
         setForm(prev => ({ ...prev, title: dropped[0].name.replace(/\.[^/.]+$/, '') }));
       }
@@ -570,6 +594,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
     const selected = Array.from(e.target.files ?? []);
     if (mode === 'single' && selected[0]) {
       setFile(selected[0]);
+      setDuplicate(null);
       if (!form.title) {
         setForm(prev => ({ ...prev, title: selected[0].name.replace(/\.[^/.]+$/, '') }));
       }
@@ -582,6 +607,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
   const removeFile = (index?: number) => {
     if (mode === 'single') {
       setFile(null);
+      setDuplicate(null);
     } else if (index !== undefined) {
       setFiles(prev => prev.filter((_, i) => i !== index));
     }
@@ -622,57 +648,62 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const uploadSingle = async (allowDuplicate: boolean) => {
     setError('');
-    setBulkResults(null);
-
-    if (mode === 'single') {
-      if (!file || !form.title) {
-        setError('Title and file are required');
-        return;
-      }
-      const reportDate = parseDateInput(dateText);
-      if (!reportDate) {
-        setDateError('Use a date like 2026-05-14, 14/05/2026, or 14 May 2026');
-        setError('Enter a valid report date');
-        return;
-      }
-      setUploading(true);
-      try {
-        const report = await apiService.uploadMedicalReport(
-          file,
-          form.title,
-          form.report_type,
-          form.lab_name,
-          reportDate,
-          undefined,
-          reviewChoice
-        );
-        onSuccess(report);
-      } catch {
-        setError('Upload failed. Please try again.');
-      } finally {
-        setUploading(false);
-      }
+    if (!file || !form.title) {
+      setError('Title and file are required');
       return;
     }
-
-    if (files.length === 0) {
-      setError('Select at least one file');
+    const reportDate = parseDateInput(dateText);
+    if (!reportDate) {
+      setDateError('Use a date like 2026-05-14, 14/05/2026, or 14 May 2026');
+      setError('Enter a valid report date');
       return;
     }
-
     setUploading(true);
     try {
-      const result = await apiService.bulkUploadMedicalReports(files, reviewChoice);
+      const report = await apiService.uploadMedicalReport(
+        file,
+        form.title,
+        form.report_type,
+        form.lab_name,
+        reportDate,
+        undefined,
+        reviewChoice,
+        allowDuplicate
+      );
+      setDuplicate(null);
+      onSuccess(report);
+    } catch (err) {
+      const repeated = duplicateUploadOf(err);
+      if (repeated) {
+        setDuplicate(repeated);
+      } else {
+        setError(apiErrorMessage(err, 'Upload failed. Please try again.'));
+      }
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const uploadBatch = async (batch: File[], allowDuplicate: boolean) => {
+    setError('');
+    setUploading(true);
+    try {
+      const result = await apiService.bulkUploadMedicalReports(batch, reviewChoice, allowDuplicate);
       setBulkResults(result);
+      setLastBatch(batch);
       setFiles([]);
       onBulkSuccess();
+      const skipped = result.error_details.filter(item => item.duplicate_of).length;
+      const failed = result.errors - skipped;
       if (result.errors === 0) {
         toast(`All ${result.created} reports uploaded`, 'success');
       } else {
-        toast(`${result.created} uploaded, ${result.errors} failed`, result.created > 0 ? 'info' : 'error');
+        const parts = [`${result.created} uploaded`];
+        if (skipped > 0) parts.push(`${skipped} already uploaded`);
+        if (failed > 0) parts.push(`${failed} failed`);
+        toast(parts.join(', '), result.created > 0 ? 'info' : failed > 0 ? 'error' : 'info');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message.replace(/^API Error: \d+ \w+ - /, '') : 'Bulk upload failed';
@@ -681,6 +712,23 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
       setUploading(false);
     }
   };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBulkResults(null);
+    if (mode === 'single') {
+      await uploadSingle(false);
+      return;
+    }
+    if (files.length === 0) {
+      setError('Select at least one file');
+      return;
+    }
+    await uploadBatch(files, false);
+  };
+
+  const skippedDuplicates = bulkResults?.error_details.filter(item => item.duplicate_of) ?? [];
+  const failures = bulkResults?.error_details.filter(item => !item.duplicate_of) ?? [];
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -712,6 +760,25 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
         </div>
 
         {error && <div className="alert alert-error" style={{ margin: '0 var(--space-6) var(--space-4)' }}>{error}</div>}
+
+        {duplicate && mode === 'single' && (
+          <div className="alert alert-warning" role="alert" style={{ margin: '0 var(--space-6) var(--space-4)', display: 'block' }}>
+            <p style={{ margin: 0 }}>
+              This file is already uploaded as{' '}
+              <Link to={`/medical-reports/${duplicate.id}`} onClick={onClose}>{duplicate.title}</Link>
+              {' '}(report date {reportDateLabel(duplicate.report_date)}). Uploading it again shows each of its
+              results twice on Health Trends.
+            </p>
+            <div className="row" style={{ gap: 'var(--space-2)', marginTop: 'var(--space-3)', flexWrap: 'wrap' }}>
+              <button type="button" className="btn btn-secondary btn-sm" disabled={uploading} onClick={() => uploadSingle(true)}>
+                Upload anyway
+              </button>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDuplicate(null)}>
+                Keep the existing report
+              </button>
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="modal-body">
           <div
@@ -879,15 +946,43 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess, onBulkSuc
               <p className="eyebrow" style={{ marginBottom: 'var(--space-3)' }}>Bulk upload summary</p>
               <div className="row" style={{ gap: 'var(--space-4)', flexWrap: 'wrap', marginBottom: 'var(--space-3)' }}>
                 <span className="badge badge-success">{bulkResults.created} created</span>
-                {bulkResults.errors > 0 && <span className="badge badge-danger">{bulkResults.errors} failed</span>}
+                {skippedDuplicates.length > 0 && (
+                  <span className="badge badge-warning">{skippedDuplicates.length} already uploaded</span>
+                )}
+                {failures.length > 0 && <span className="badge badge-danger">{failures.length} failed</span>}
                 <span className="badge badge-muted">{bulkResults.total} total</span>
               </div>
-              {bulkResults.error_details.length > 0 && (
+              {failures.length > 0 && (
                 <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>
-                  {bulkResults.error_details.map((err, i) => (
+                  {failures.map((err, i) => (
                     <li key={i}>{err.file}: {err.error}</li>
                   ))}
                 </ul>
+              )}
+              {skippedDuplicates.length > 0 && (
+                <>
+                  <p className="form-hint" style={{ margin: 'var(--space-3) 0 var(--space-2)' }}>
+                    Skipped, because the same file is already uploaded:
+                  </p>
+                  <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>
+                    {skippedDuplicates.map((item, i) => (
+                      <li key={i}>
+                        {item.file}: already uploaded as{' '}
+                        <Link to={`/medical-reports/${item.duplicate_of!.id}`} onClick={onClose}>{item.duplicate_of!.title}</Link>
+                        {' '}({reportDateLabel(item.duplicate_of!.report_date)})
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ marginTop: 'var(--space-3)' }}
+                    disabled={uploading || skippedFiles(lastBatch, bulkResults).length === 0}
+                    onClick={() => uploadBatch(skippedFiles(lastBatch, bulkResults), true)}
+                  >
+                    Upload {skippedDuplicates.length === 1 ? 'it' : 'them'} anyway
+                  </button>
+                </>
               )}
             </div>
           )}

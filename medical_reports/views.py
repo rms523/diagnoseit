@@ -18,6 +18,7 @@ from .ai_review import (
     PENDING, ReviewConflict, apply_suggestions, dismiss_suggestion, review_status, start_review, stop_review,
     undo_applied, visible_review,
 )
+from .duplicates import DUPLICATE_CODE, allows_duplicate, describe, duplicate_message, duplicate_of, file_sha256
 from .models import MedicalReport, TestResult
 from .serializers import (
     MedicalReportSerializer, MedicalReportListSerializer,
@@ -97,9 +98,21 @@ class MedicalReportListCreateView(generics.ListCreateAPIView):
             'test_results__test_type'
         )
 
+    def create(self, request, *args, **kwargs):
+        """Refuse a file the user already uploaded, naming that report, unless asked to upload it anyway."""
+        upload = request.FILES.get('file')
+        self.file_sha256 = file_sha256(upload) if upload else ''
+        existing = None if allows_duplicate(request) else duplicate_of(request.user, self.file_sha256)
+        if existing is not None:
+            return Response(
+                {'error': duplicate_message(existing), 'code': DUPLICATE_CODE, 'duplicate_of': describe(existing)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         """Save report and queue async parsing for PDFs."""
-        report = serializer.save()
+        report = serializer.save(file_sha256=getattr(self, 'file_sha256', ''))
 
         if report.file and report.file.name.lower().endswith('.pdf'):
             _queue_pdf_parse(report, review=_review_choice(self.request))
@@ -746,6 +759,10 @@ def bulk_upload_reports(request):
       YYYY-MM-DD_labname.pdf   -> report_date and lab_name (e.g. 2026-05-14_lalpath.pdf)
       YYYY-MM-DD-anything.pdf  -> report_date only
     Files without a leading date use today's date.
+
+    A file the user already uploaded, earlier or in this batch, is skipped unless allow_duplicate is set. It
+    is listed in error_details with the report it matches (duplicate_of), so apps that only know about
+    errors still say why it was not uploaded, and counted again in duplicates.
     """
     files = request.FILES.getlist('files')
     if not files:
@@ -764,7 +781,9 @@ def bulk_upload_reports(request):
 
     created = []
     errors = []
+    duplicates = 0
     review = _review_choice(request)
+    allow_duplicates = allows_duplicate(request)
 
     for uploaded_file in files:
         filename = uploaded_file.name
@@ -775,6 +794,12 @@ def bulk_upload_reports(request):
             validate_medical_upload(uploaded_file)
         except ValueError as exc:
             errors.append({'file': filename, 'error': str(exc)})
+            continue
+        digest = file_sha256(uploaded_file)
+        existing = None if allow_duplicates else duplicate_of(request.user, digest)
+        if existing is not None:
+            errors.append({'file': filename, 'error': duplicate_message(existing), 'duplicate_of': describe(existing)})
+            duplicates += 1
             continue
         lab_name = ''
         name_match = FILENAME_RE.match(filename[:-len('.pdf')])
@@ -800,6 +825,7 @@ def bulk_upload_reports(request):
                     lab_name=lab_name,
                     report_date=report_date,
                     file=uploaded_file,
+                    file_sha256=digest,
                 )
 
                 _queue_pdf_parse(report, review=review)
@@ -820,6 +846,7 @@ def bulk_upload_reports(request):
         'total': len(files),
         'created': len(created),
         'errors': len(errors),
+        'duplicates': duplicates,
         'reports': created,
         'error_details': errors,
     }, status=status.HTTP_200_OK)

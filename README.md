@@ -10,7 +10,7 @@ DiagnoseIt keeps your medical documents in one place you control. Upload a lab r
 
 ## Features
 
-- **Lab reports**: PDF and scan upload (single or bulk), text and vision-model parsing, background processing with live status, side-by-side PDF comparison, JSON export
+- **Lab reports**: PDF and scan upload (single or bulk, with a warning for a file already uploaded), text and vision-model parsing, background processing with live status, side-by-side PDF comparison, JSON export
 - **Health trends**: one entry per catalog test, values converted into a common unit, up to ten tests charted together on a shared date axis
 - **Lab test catalog**: ranges, units, aliases and unit conversions; editable in the app, with printed names matched to the right test
 - **Prescriptions**: clinic PDFs or photos read into editable medicine lists, with AI review of the result

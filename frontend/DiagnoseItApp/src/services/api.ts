@@ -74,10 +74,20 @@ export interface PrescriptionStatusResponse extends ReportStatusResponse {
   medication_count: number;
 }
 
+/** A report of the user's whose file an upload repeats. */
+export interface DuplicateReport {
+  id: number;
+  title: string;
+  report_date: string;
+  created_at: string;
+}
+
 export interface BulkUploadResult {
   total: number;
   created: number;
+  /** Files not uploaded, including those already uploaded (counted again in duplicates). */
   errors: number;
+  duplicates?: number;
   reports: Array<{
     id: number;
     title: string;
@@ -85,7 +95,7 @@ export interface BulkUploadResult {
     status: string;
     is_parsed: boolean;
   }>;
-  error_details: Array<{ file: string; error: string }>;
+  error_details: Array<{ file: string; error: string; duplicate_of?: DuplicateReport }>;
 }
 
 export interface TestResult {
@@ -369,7 +379,8 @@ class ApiService {
     report_type: string = 'LAB',
     lab_name?: string,
     report_date?: string,
-    notes?: string
+    notes?: string,
+    allowDuplicate?: boolean
   ): Promise<MedicalReport> {
     const formData = new FormData();
     formData.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
@@ -378,6 +389,7 @@ class ApiService {
     if (lab_name) formData.append('lab_name', lab_name);
     if (report_date) formData.append('report_date', report_date);
     if (notes) formData.append('notes', notes);
+    if (allowDuplicate) formData.append('allow_duplicate', 'true');
 
     return this.request<MedicalReport>('/medical-reports/reports/', {
       method: 'POST',
@@ -385,11 +397,13 @@ class ApiService {
     });
   }
 
-  async bulkUploadMedicalReports(files: UploadFile[]): Promise<BulkUploadResult> {
+  /** allowDuplicate uploads files already uploaded instead of skipping them. */
+  async bulkUploadMedicalReports(files: UploadFile[], allowDuplicate?: boolean): Promise<BulkUploadResult> {
     const formData = new FormData();
     files.forEach(file => {
       formData.append('files', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
     });
+    if (allowDuplicate) formData.append('allow_duplicate', 'true');
     return this.request<BulkUploadResult>('/medical-reports/reports/bulk-upload/', {
       method: 'POST',
       body: formData,

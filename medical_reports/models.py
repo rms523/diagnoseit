@@ -35,6 +35,8 @@ class MedicalReport(models.Model):
         upload_to='medical_reports/',
         validators=[FileExtensionValidator(allowed_extensions=['pdf'])]
     )
+    # SHA-256 of the file, so uploading it again can be noticed (medical_reports/duplicates.py).
+    file_sha256 = models.CharField(max_length=64, blank=True, default='', db_index=True, editable=False)
     parsed_data = models.JSONField(default=dict, blank=True)  # Store extracted data
     is_parsed = models.BooleanField(default=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')

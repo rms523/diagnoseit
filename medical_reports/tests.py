@@ -25,7 +25,8 @@ User = get_user_model()
 
 
 def _fake_pdf(name: str = "report.pdf") -> SimpleUploadedFile:
-    return SimpleUploadedFile(name, b"%PDF-1.4 fake", content_type="application/pdf")
+    # Content differs per name: an upload of the same bytes again is refused as already uploaded.
+    return SimpleUploadedFile(name, b"%PDF-1.4 fake " + name.encode(), content_type="application/pdf")
 
 
 @override_settings(
