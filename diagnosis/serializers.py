@@ -24,9 +24,9 @@ class DiagnosisSerializer(serializers.ModelSerializer):
             'id', 'condition_name', 'description', 'confidence_score',
             'symptoms_considered', 'test_results_considered', 'recommendations',
             'follow_up_required', 'follow_up_notes', 'analysis', 'context', 'history',
-            'created_at', 'updated_at'
+            'status', 'error', 'progress', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'analysis', 'context', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'analysis', 'context', 'status', 'error', 'progress', 'created_at', 'updated_at']
 
     def create(self, validated_data):
         validated_data['user'] = self.context['request'].user

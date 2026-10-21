@@ -216,6 +216,7 @@ def review_prescription(
             [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': content}],
             max_tokens=max(config.max_tokens, 2000),
             temperature=config.temperature_or(DEFAULT_TEMPERATURES[ROLE_REPORT_REVIEW]),
+            background=True,
         )
         payload = parse_json_object(reply)
     except ValueError as exc:

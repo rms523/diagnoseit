@@ -7,12 +7,14 @@ the rest of the app already relied on are filled from its leading candidate.
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from ai_settings.services import AIConfig
 from diagnosis.models import Diagnosis
+from diagnosis.tasks import generate_diagnosis_task
 from utils.llm_service import (
     DIAGNOSIS_REPLY_FORMAT,
     DIAGNOSIS_TASK,
@@ -118,6 +120,7 @@ class NormalizeDiagnosisTests(TestCase):
 
 class TimelineDiagnosisStorageTests(TestCase):
     def setUp(self):
+        cache.clear()  # the five-a-minute generate limit
         self.user = User.objects.create_user(username="patient", password="testpass123")
         self.client = APIClient()
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=self.user).key}")
@@ -125,14 +128,16 @@ class TimelineDiagnosisStorageTests(TestCase):
     def test_a_generated_diagnosis_keeps_its_differential_and_its_red_flags(self):
         reply = {**FULL_REPLY, 'red_flags': ['Haemoglobin below 8 would need urgent review']}
         with patch('utils.llm_service.get_ai_config', return_value=CONFIGURED), \
-             patch('utils.llm_service.chat_json', return_value=__import__('json').dumps(reply)):
+             patch('utils.llm_service.stream_chat_json', return_value=__import__('json').dumps(reply)), \
+             patch('diagnosis.tasks.generate_diagnosis_task.delay', side_effect=generate_diagnosis_task), \
+             self.captureOnCommitCallbacks(execute=True):
             response = self.client.post(
                 '/api/diagnosis/diagnoses/generate/',
                 {'mode': 'timeline', 'period': '1y', 'summary': 'Tired'},
                 format='json',
             )
 
-        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.status_code, 202, response.data)
         stored = Diagnosis.objects.get(pk=response.data['id'])
         self.assertEqual(stored.condition_name, 'Iron deficiency anaemia')
         self.assertEqual(
@@ -142,15 +147,15 @@ class TimelineDiagnosisStorageTests(TestCase):
         # Red flags were asked for by the old prompt and then thrown away; they are kept now.
         self.assertEqual(stored.analysis['red_flags'], ['Haemoglobin below 8 would need urgent review'])
         self.assertEqual(stored.analysis['false_positives'][0]['condition'], 'Anaemia of chronic disease')
-        self.assertEqual(response.data['analysis']['cautions'], FULL_REPLY['cautions'])
+        self.assertEqual(self.client.get(f"/api/diagnosis/diagnoses/{stored.id}/").data['analysis']['cautions'], FULL_REPLY['cautions'])
 
     def test_a_differential_is_given_room_to_be_written(self):
         """The service default of 1000 tokens truncates a five-way differential into unparseable JSON."""
         from utils.llm_service import DIAGNOSIS_REPLY_TOKENS, LLMService
 
         with patch('utils.llm_service.get_ai_config', return_value=CONFIGURED), \
-             patch('utils.llm_service.chat_json', return_value='{"differential": []}') as ask:
-            LLMService().generate_timeline_diagnosis('prompt')
+             patch('utils.llm_service.stream_chat_json', return_value='{"differential": []}') as ask:
+            LLMService().diagnose('prompt')
 
         self.assertEqual(ask.call_args.kwargs['max_tokens'], DIAGNOSIS_REPLY_TOKENS)
         self.assertGreater(DIAGNOSIS_REPLY_TOKENS, CONFIGURED.max_tokens)

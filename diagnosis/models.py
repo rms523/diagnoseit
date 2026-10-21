@@ -13,7 +13,19 @@ class Diagnosis(models.Model):
         (4, 'High'),
         (5, 'Very High'),
     ]
-    
+    # Generated diagnoses are written on the Celery worker (diagnosis.tasks): PENDING while queued, PROCESSING
+    # while the model writes, then COMPLETED or FAILED. Ones made before that, or by hand, are COMPLETED.
+    PENDING = 'PENDING'
+    PROCESSING = 'PROCESSING'
+    COMPLETED = 'COMPLETED'
+    FAILED = 'FAILED'
+    STATUS_CHOICES = [
+        (PENDING, 'Queued'),
+        (PROCESSING, 'Generating'),
+        (COMPLETED, 'Completed'),
+        (FAILED, 'Failed'),
+    ]
+
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='diagnoses')
     condition_name = models.CharField(max_length=200)
     description = models.TextField()
@@ -29,6 +41,12 @@ class Diagnosis(models.Model):
     analysis = models.JSONField(default=dict, blank=True)
     # What a health timeline diagnosis was based on: mode, period, and how many entries of each kind were sent.
     context = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=COMPLETED)
+    # Why a FAILED diagnosis has no answer; safe to show to the user.
+    error = models.TextField(blank=True)
+    # How far the model has got, from its streamed reply: phase (waiting, thinking, writing), reasoning_tokens,
+    # reply_tokens, started_at, and updated_at.
+    progress = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

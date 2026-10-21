@@ -29,6 +29,29 @@ function timelineDescription(context: DiagnosisContext): string {
   return `Health timeline ${since}${parts.length ? ` · ${parts.join(', ')}` : ' · nothing recorded'}`;
 }
 
+/** Queued or being written on the worker; older servers send no status, and theirs are finished. */
+const isRunning = (d: Diagnosis) => d.status === 'PENDING' || d.status === 'PROCESSING';
+
+function elapsed(since?: string): string {
+  const seconds = since ? Math.max(0, Math.round((Date.now() - Date.parse(since)) / 1000)) : NaN;
+  if (Number.isNaN(seconds)) return '';
+  return seconds < 60 ? ` · ${seconds} s` : ` · ${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+}
+
+/** "Thinking · 1,240 tokens · 3 min 5 s", from the model's streamed reply. */
+function progressText(d: Diagnosis): string {
+  if (d.status === 'PENDING') return 'Queued. Starts once any AI review already running has finished.';
+  const progress = d.progress ?? {};
+  const time = elapsed(progress.started_at);
+  const tokens = (count?: number) => (count ?? 0).toLocaleString();
+  if (progress.phase === 'writing') {
+    const thought = progress.reasoning_tokens ? `, after ${tokens(progress.reasoning_tokens)} thinking` : '';
+    return `Writing the answer · ${tokens(progress.reply_tokens)} tokens${thought}${time}`;
+  }
+  if (progress.phase === 'thinking') return `Thinking · ${tokens(progress.reasoning_tokens)} tokens${time}`;
+  return `Waiting for the model to read the request${time}`;
+}
+
 const Diagnoses: React.FC = () => {
   const { toast, confirm } = useToast();
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([]);
@@ -72,12 +95,23 @@ const Diagnoses: React.FC = () => {
     } catch { /* ignore */ }
   };
 
-  const handleDelete = async (id: number) => {
-    const ok = await confirm('Delete this diagnosis? This cannot be undone.');
+  useEffect(() => {
+    // Keep refreshing while a diagnosis is queued or being written; progress is saved every few seconds.
+    if (!diagnoses.some(isRunning)) return;
+    const id = window.setInterval(refetch, 4000);
+    return () => clearInterval(id);
+  }, [diagnoses]);
+
+  const handleDelete = async (d: Diagnosis) => {
+    const ok = await confirm(
+      isRunning(d)
+        ? 'Stop this diagnosis and delete it? The model stops the next time it sends something.'
+        : 'Delete this diagnosis? This cannot be undone.'
+    );
     if (!ok) return;
     try {
-      await apiService.deleteDiagnosis(id);
-      setDiagnoses(prev => prev.filter(d => d.id !== id));
+      await apiService.deleteDiagnosis(d.id);
+      setDiagnoses(prev => prev.filter(other => other.id !== d.id));
       toast('Diagnosis deleted', 'success');
     } catch {
       toast('Failed to delete diagnosis', 'error');
@@ -155,9 +189,12 @@ const Diagnoses: React.FC = () => {
       ) : (
         <div className="stack stagger-children">
           <h3 style={{ fontSize: 'var(--font-lg)', color: 'var(--text-secondary)' }}>History ({diagnoses.length})</h3>
-          {diagnoses.map(d => (
-            <div key={d.id} className="card" style={{ cursor: 'pointer' }}
-              onClick={() => setExpandedId(expandedId === d.id ? null : d.id)}>
+          {diagnoses.map(d => {
+            const running = isRunning(d);
+            const finished = !running && d.status !== 'FAILED';
+            return (
+            <div key={d.id} className="card" style={{ cursor: finished ? 'pointer' : 'default' }}
+              onClick={() => finished && setExpandedId(expandedId === d.id ? null : d.id)}>
               <div className="row-between" style={{ marginBottom: 'var(--space-2)' }}>
                 <div>
                   <div style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>{d.condition_name}</div>
@@ -171,26 +208,38 @@ const Diagnoses: React.FC = () => {
                   )}
                 </div>
                 <div className="row" style={{ gap: 'var(--space-2)' }}>
-                  {d.follow_up_required && <span className="badge badge-warning">Follow-up needed</span>}
-                  <span className="badge badge-purple">
-                    Confidence: {d.confidence_score}/5
-                  </span>
-                  <button className="btn btn-danger btn-sm" aria-label="Delete diagnosis"
-                    onClick={e => { e.stopPropagation(); handleDelete(d.id); }}>
+                  {finished && d.follow_up_required && <span className="badge badge-warning">Follow-up needed</span>}
+                  {finished && (
+                    <span className="badge badge-purple">
+                      Confidence: {d.confidence_score}/5
+                    </span>
+                  )}
+                  <button className="btn btn-danger btn-sm" aria-label={running ? 'Stop and delete diagnosis' : 'Delete diagnosis'}
+                    onClick={e => { e.stopPropagation(); handleDelete(d); }}>
                     <IconTrash size={14} />
                   </button>
                 </div>
               </div>
 
-              {/* Confidence bar */}
-              <div className="confidence-bar" style={{ marginBottom: 'var(--space-3)' }}>
-                <div className="confidence-fill" style={{
-                  width: `${(d.confidence_score / 5) * 100}%`,
-                  background: confidenceColor(d.confidence_score),
-                }} />
-              </div>
+              {running && (
+                <div className="row" role="status" style={{ gap: 'var(--space-2)', fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>
+                  <span className="spinner" /> {progressText(d)}
+                </div>
+              )}
 
-              {expandedId === d.id && (
+              {d.status === 'FAILED' && <div className="alert alert-error">{d.error || 'The AI diagnosis failed.'}</div>}
+
+              {/* Confidence bar */}
+              {finished && (
+                <div className="confidence-bar" style={{ marginBottom: 'var(--space-3)' }}>
+                  <div className="confidence-fill" style={{
+                    width: `${(d.confidence_score / 5) * 100}%`,
+                    background: confidenceColor(d.confidence_score),
+                  }} />
+                </div>
+              )}
+
+              {finished && expandedId === d.id && (
                 <div style={{ animation: 'slideUp 0.3s ease' }}>
                   {d.description && (
                     <div style={{ marginBottom: 'var(--space-4)' }}>
@@ -217,7 +266,8 @@ const Diagnoses: React.FC = () => {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -225,7 +275,11 @@ const Diagnoses: React.FC = () => {
         <GenerateModal
           symptoms={symptoms}
           onClose={() => setShowGenerate(false)}
-          onSuccess={() => { setShowGenerate(false); refetch(); }}
+          onSuccess={() => {
+            setShowGenerate(false);
+            toast('Diagnosis started. It appears below while the model works.', 'success');
+            refetch();
+          }}
           onError={(msg) => setError(msg)}
         />
       )}
@@ -311,8 +365,8 @@ const GenerateModal: React.FC<GenerateModalProps> = ({ symptoms: availableSympto
         include_test_results: includeTests,
       });
       onSuccess();
-    } catch {
-      onError('Failed to generate diagnosis. Make sure the OpenAI API key is configured.');
+    } catch (err) {
+      onError(apiErrorMessage(err, 'Failed to start the diagnosis'));
     } finally {
       setGenerating(false);
     }
@@ -458,7 +512,7 @@ const GenerateModal: React.FC<GenerateModalProps> = ({ symptoms: availableSympto
               </button>
             )}
             <button className="btn btn-primary btn-lg" onClick={handleGenerate} disabled={generating}>
-              {generating ? <><span className="spinner" /> Analyzing…</> : 'Generate diagnosis'}
+              {generating ? <><span className="spinner" /> Starting…</> : 'Generate diagnosis'}
             </button>
           </div>
         </div>

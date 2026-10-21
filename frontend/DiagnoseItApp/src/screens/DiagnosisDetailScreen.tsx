@@ -21,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiService, Diagnosis } from '../services/api';
 import { theme } from '../theme/theme';
 import { getConfidenceColor } from '../utils/colors';
+import { diagnosisProgressText, isDiagnosisRunning } from '../utils/diagnosisStatus';
 
 export default function DiagnosisDetailScreen({ route, navigation }: any) {
   const { diagnosisId } = route.params;
@@ -31,6 +32,19 @@ export default function DiagnosisDetailScreen({ route, navigation }: any) {
   useEffect(() => {
     loadDiagnosis();
   }, [diagnosisId]);
+
+  useEffect(() => {
+    // Follow a diagnosis the model is still writing until it is ready or has failed.
+    if (!diagnosis || !isDiagnosisRunning(diagnosis)) return;
+    const id = setInterval(async () => {
+      try {
+        setDiagnosis(await apiService.getDiagnosis(diagnosisId));
+      } catch {
+        /* try again on the next tick */
+      }
+    }, 4000);
+    return () => clearInterval(id);
+  }, [diagnosis, diagnosisId]);
 
   const loadDiagnosis = async () => {
     try {
@@ -91,6 +105,30 @@ export default function DiagnosisDetailScreen({ route, navigation }: any) {
             Go Back
           </Button>
         </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (diagnosis.status === 'FAILED' || isDiagnosisRunning(diagnosis)) {
+    const running = isDiagnosisRunning(diagnosis);
+    return (
+      <SafeAreaView style={styles.container}>
+        <ScrollView
+          style={styles.scrollView}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        >
+          <Card style={styles.headerCard}>
+            <Card.Content>
+              <Title style={styles.diagnosisTitle}>{diagnosis.condition_name}</Title>
+              <View style={styles.statusRow}>
+                {running && <ActivityIndicator size="small" color={theme.colors.primary} />}
+                <Text style={running ? styles.statusText : styles.failedText}>
+                  {running ? diagnosisProgressText(diagnosis) : diagnosis.error || 'The AI diagnosis failed.'}
+                </Text>
+              </View>
+            </Card.Content>
+          </Card>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -269,6 +307,20 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  statusText: {
+    flex: 1,
+    color: theme.colors.onSurfaceVariant,
+  },
+  failedText: {
+    flex: 1,
+    color: theme.colors.error,
   },
   loadingText: {
     marginTop: 16,

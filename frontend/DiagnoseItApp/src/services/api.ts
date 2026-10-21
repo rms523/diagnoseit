@@ -165,6 +165,18 @@ export interface SymptomLog {
   logged_at: string;
 }
 
+/** Generated diagnoses are written on the worker: PENDING while queued, PROCESSING while the model writes. */
+export type DiagnosisStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+/** How far the model has got, from its streamed reply. Tokens are counted as the server sends them. */
+export interface DiagnosisProgress {
+  phase?: 'waiting' | 'thinking' | 'writing';
+  reasoning_tokens?: number;
+  reply_tokens?: number;
+  started_at?: string;
+  updated_at?: string;
+}
+
 export interface Diagnosis {
   id: number;
   condition_name: string;
@@ -175,6 +187,10 @@ export interface Diagnosis {
   recommendations: string;
   follow_up_required: boolean;
   follow_up_notes: string;
+  status?: DiagnosisStatus;
+  /** Why a FAILED diagnosis has no answer. */
+  error?: string;
+  progress?: DiagnosisProgress;
   created_at: string;
   updated_at: string;
 }
@@ -614,6 +630,7 @@ class ApiService {
     include_medical_history?: boolean;
     include_test_results?: boolean;
   }): Promise<Diagnosis> {
+    // Returns at once with the diagnosis PENDING; poll it until the worker has the model's answer.
     return this.request<Diagnosis>('/diagnosis/diagnoses/generate/', {
       method: 'POST',
       body: JSON.stringify(data),

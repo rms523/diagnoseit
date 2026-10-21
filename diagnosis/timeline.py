@@ -103,7 +103,9 @@ def build_timeline(user, period: str = DEFAULT_PERIOD, today: date | None = None
         counts['prescriptions'] += 1
         counts['medications'] += len(medications)
 
-    for diagnosis in Diagnosis.objects.filter(user=user).exclude(condition_name=PLACEHOLDER_CONDITION).order_by('created_at'):
+    # Only finished assessments: one still being written, or one that failed, says nothing about the patient.
+    assessments = Diagnosis.objects.filter(user=user, status=Diagnosis.COMPLETED).exclude(condition_name=PLACEHOLDER_CONDITION)
+    for diagnosis in assessments.order_by('created_at'):
         day = _day(diagnosis.created_at)
         if in_period(day):
             events[day].append(

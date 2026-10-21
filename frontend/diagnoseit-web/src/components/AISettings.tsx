@@ -13,6 +13,15 @@ const ROLE_HELP: Record<AIRole, string> = {
     'Checks parsed results against the original report, from the report page or automatically after parsing. Page images need a vision model.',
 };
 
+// Answers given inside a page request end with the web server's, so they wait at most 270 s
+// (REQUEST_TIMEOUT_CAP_SECONDS in ai_settings/client.py); background work uses the setting in full.
+const TIMEOUT_HINTS: Partial<Record<AIRole, string>> = {
+  diagnosis:
+    'Diagnoses run in the background and stop only when the model sends nothing for this long. Ask AI chat answers within the page, so it waits at most 270 seconds.',
+  report_review:
+    'Reviews and prescription reading run in the background and wait this long. Test link suggestions on Health Trends answer within the page, so they wait at most 270 seconds.',
+};
+
 const SOURCE_LABELS: Record<AIServiceSettings['source'], string> = {
   database: 'Saved here',
   environment: 'Server environment defaults',
@@ -322,6 +331,7 @@ const AIServiceCard: React.FC<AIServiceCardProps> = ({ service, canEdit, onChang
               value={form.timeout_seconds}
               onChange={e => update('timeout_seconds', e.target.value)}
             />
+            {TIMEOUT_HINTS[role] && <div className="form-hint">{TIMEOUT_HINTS[role]}</div>}
           </div>
 
           <div className="form-group">

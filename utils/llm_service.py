@@ -4,9 +4,12 @@ LLM integration service for diagnosis assistance
 import json
 import logging
 from datetime import date
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
-from ai_settings.client import chat_json, parse_json_object
+import httpx
+from openai import APITimeoutError, OpenAIError
+
+from ai_settings.client import StreamProgress, chat_json, parse_json_object, stream_chat_json
 from ai_settings.services import DEFAULT_TEMPERATURES, ROLE_DIAGNOSIS, get_ai_config
 from utils.report_redaction import Redactor
 
@@ -313,48 +316,47 @@ IMPORTANT: This is for informational purposes only. The patient should always co
 
         return "\n".join(formatted)
 
-    def generate_diagnosis(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate diagnosis using LLM"""
-        if not self.config.is_configured:
-            logger.warning("AI diagnosis is not configured")
-            return self._get_placeholder_diagnosis()
+    def diagnosis_prompt(self, user_data: Dict[str, Any]) -> str:
+        """The prompt for a diagnosis from the symptoms, results, and medicines given, without personal details."""
+        return self.prepare_diagnosis_prompt(self.anonymize_health_data(user_data))
 
-        try:
-            anonymized_data = self.anonymize_health_data(user_data)
-            prompt = self.prepare_diagnosis_prompt(anonymized_data)
+    def diagnose(
+        self, prompt: str, on_progress: Optional[Callable[[StreamProgress], None]] = None
+    ) -> Dict[str, Any]:
+        """Ask for a diagnosis, streamed; raises LLMError instead of returning a placeholder.
 
-            return self._call_llm_api(prompt)
-
-        except Exception as e:
-            logger.error(f"Error calling LLM API: {e}")
-            return self._get_placeholder_diagnosis()
-
-    def _call_llm_api(self, prompt: str) -> Dict[str, Any]:
-        """Call the configured OpenAI-compatible chat API"""
-        try:
-            return self._diagnosis_from_reply(self._ask(prompt))
-        except Exception as e:
-            logger.error(f"AI diagnosis API error: {e}")
-            return self._get_placeholder_diagnosis()
-
-    def generate_timeline_diagnosis(self, prompt: str) -> Dict[str, Any]:
-        """Ask for a diagnosis from a timeline prompt; raises LLMError instead of returning a placeholder."""
+        Runs on the Celery worker (diagnosis.tasks), so the timeout setting applies in full, as the longest the
+        model may go without sending anything.
+        """
         if not self.config.is_configured:
             raise LLMError('AI diagnosis is not set up. Configure it in AI settings.')
         try:
-            content = self._ask(prompt)
-        except Exception as exc:
+            content = stream_chat_json(
+                self.config,
+                [{"role": "system", "content": DIAGNOSIS_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                max_tokens=self.reply_tokens,
+                temperature=self.config.temperature_or(DEFAULT_TEMPERATURES[ROLE_DIAGNOSIS]),
+                on_progress=on_progress,
+            )
+        except (OpenAIError, httpx.HTTPError) as exc:
             logger.error("AI diagnosis API error: %s", exc)
+            if isinstance(exc, (APITimeoutError, httpx.TimeoutException)):
+                raise LLMError(
+                    f'The AI diagnosis model sent nothing for {self.config.timeout_seconds} seconds '
+                    f'({type(exc).__name__}). Raise the timeout in AI settings if the model needs longer.'
+                ) from exc
             raise LLMError(f'The AI diagnosis model did not respond ({type(exc).__name__}).') from exc
+        if not content:
+            # A reasoning model can spend every token it is allowed on thinking and never start the answer.
+            raise LLMError(
+                f'The AI diagnosis model finished without an answer. If it is a reasoning model, it may have '
+                f'used all {self.reply_tokens} max tokens thinking.'
+            )
         return self._diagnosis_from_reply(content)
 
-    def _ask(self, prompt: str) -> str:
-        return chat_json(
-            self.config,
-            [{"role": "system", "content": DIAGNOSIS_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
-            max_tokens=max(self.config.max_tokens, DIAGNOSIS_REPLY_TOKENS),
-            temperature=self.config.temperature_or(DEFAULT_TEMPERATURES[ROLE_DIAGNOSIS]),
-        )
+    @property
+    def reply_tokens(self) -> int:
+        return max(self.config.max_tokens, DIAGNOSIS_REPLY_TOKENS)
 
     def _diagnosis_from_reply(self, content: str) -> Dict[str, Any]:
         try:
@@ -374,7 +376,7 @@ IMPORTANT: This is for informational purposes only. The patient should always co
                 'raw_response': content,
             }
 
-    def _get_placeholder_diagnosis(self) -> Dict[str, Any]:
+    def placeholder_diagnosis(self) -> Dict[str, Any]:
         """Get placeholder diagnosis when LLM is not available"""
         return {
             'condition_name': PLACEHOLDER_CONDITION,
@@ -498,12 +500,6 @@ def calculate_age(birth_date) -> Optional[int]:
 
 
 # Convenience functions
-def generate_diagnosis(user_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate diagnosis using LLM service"""
-    service = LLMService()
-    return service.generate_diagnosis(user_data)
-
-
 def analyze_health_trends(trend_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Analyze health trends using LLM service"""
     service = LLMService()

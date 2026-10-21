@@ -23,6 +23,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiService, Diagnosis, Symptom, MedicalReport } from '../services/api';
 import { theme } from '../theme/theme';
 import { getConfidenceColor } from '../utils/colors';
+import { diagnosisProgressText, isDiagnosisRunning } from '../utils/diagnosisStatus';
 
 export default function DiagnosisScreen({ navigation }: any) {
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([]);
@@ -38,6 +39,19 @@ export default function DiagnosisScreen({ navigation }: any) {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    // Keep refreshing while a diagnosis is queued or being written; progress is saved every few seconds.
+    if (!diagnoses.some(isDiagnosisRunning)) return;
+    const id = setInterval(async () => {
+      try {
+        setDiagnoses(await apiService.getDiagnoses());
+      } catch {
+        /* try again on the next tick */
+      }
+    }, 4000);
+    return () => clearInterval(id);
+  }, [diagnoses]);
 
   const loadData = async () => {
     try {
@@ -87,8 +101,8 @@ export default function DiagnosisScreen({ navigation }: any) {
       await loadData();
       
       Alert.alert(
-        'Diagnosis Generated',
-        'New diagnosis has been generated successfully!',
+        'Diagnosis Started',
+        'The AI model is working on it. It appears in the list, with its progress, until it is ready.',
         [
           {
             text: 'View',
@@ -158,21 +172,25 @@ export default function DiagnosisScreen({ navigation }: any) {
         <View style={styles.diagnosisHeader}>
           <View style={styles.diagnosisInfo}>
             <Title style={styles.diagnosisTitle}>{item.condition_name}</Title>
-            <Paragraph style={styles.diagnosisDescription} numberOfLines={2}>
-              {item.description}
-            </Paragraph>
+            {item.status !== 'FAILED' && (
+              <Paragraph style={styles.diagnosisDescription} numberOfLines={2}>
+                {item.description}
+              </Paragraph>
+            )}
           </View>
           <View style={styles.diagnosisBadges}>
-            <Chip
-              style={[
-                styles.confidenceChip,
-                { backgroundColor: getConfidenceColor(item.confidence_score) }
-              ]}
-              textStyle={styles.confidenceChipText}
-            >
-              {getConfidenceText(item.confidence_score)} ({item.confidence_score}/5)
-            </Chip>
-            {item.follow_up_required && (
+            {item.status !== 'FAILED' && !isDiagnosisRunning(item) && (
+              <Chip
+                style={[
+                  styles.confidenceChip,
+                  { backgroundColor: getConfidenceColor(item.confidence_score) }
+                ]}
+                textStyle={styles.confidenceChipText}
+              >
+                {getConfidenceText(item.confidence_score)} ({item.confidence_score}/5)
+              </Chip>
+            )}
+            {item.status !== 'FAILED' && !isDiagnosisRunning(item) && item.follow_up_required && (
               <Chip
                 style={[styles.followUpChip, { backgroundColor: theme.colors.error }]}
                 textStyle={styles.followUpChipText}
@@ -188,7 +206,17 @@ export default function DiagnosisScreen({ navigation }: any) {
             />
           </View>
         </View>
-        
+
+        {isDiagnosisRunning(item) && (
+          <View style={styles.progressRow}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+            <Text style={styles.progressText}>{diagnosisProgressText(item)}</Text>
+          </View>
+        )}
+        {item.status === 'FAILED' && (
+          <Text style={styles.failedText}>{item.error || 'The AI diagnosis failed.'}</Text>
+        )}
+
         <View style={styles.diagnosisMeta}>
           <Text style={styles.diagnosisDate}>
             {new Date(item.created_at).toLocaleDateString()}
@@ -392,6 +420,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  progressText: {
+    flex: 1,
+    fontSize: 13,
+    color: theme.colors.onSurfaceVariant,
+  },
+  failedText: {
+    fontSize: 13,
+    color: theme.colors.error,
+    marginBottom: 8,
   },
   diagnosisDate: {
     fontSize: 12,

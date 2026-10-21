@@ -1,18 +1,20 @@
 """AI settings: shared by the server and maintained by administrators, with write-only keys and runtime use."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
 import requests
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from openai import BadRequestError
+from openai import APITimeoutError, BadRequestError
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-from utils.llm_service import DIAGNOSIS_REPLY_TOKENS, LLMService
+from utils.llm_service import DIAGNOSIS_REPLY_TOKENS, LLMError, LLMService
 from utils.vlm_pdf_parser import _call_vlm, _use_vlm_parser, _vlm_extraction_mode
+from .client import REQUEST_TIMEOUT_CAP_SECONDS, openai_client
 from .models import AIServiceConfig
 from .services import ROLE_DIAGNOSIS, ROLE_OCR, ROLE_REPORT_REVIEW, get_ai_config
 
@@ -48,6 +50,15 @@ def _chat_completion(content):
     completion = MagicMock()
     completion.choices = [MagicMock(message=MagicMock(content=content))]
     return completion
+
+
+def _chat_stream(content, reasoning=(), size=4):
+    """A streamed reply as servers send it: the thinking chunks first, then the answer a few characters at a time."""
+    deltas = [SimpleNamespace(content=None, reasoning_content=text) for text in reasoning]
+    deltas += [SimpleNamespace(content=content[i:i + size]) for i in range(0, len(content), size)]
+    stream = MagicMock()
+    stream.__iter__.return_value = iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta)]) for delta in deltas])
+    return stream
 
 
 @patch.dict('os.environ', ENVIRONMENT)
@@ -263,15 +274,19 @@ class AISettingsRuntimeTests(TestCase):
             role=ROLE_DIAGNOSIS, base_url='http://llm.local:8080/v1', model='qwen3-8b', max_tokens=900, timeout_seconds=900,
         )
         create = mock_openai.return_value.chat.completions.create
-        create.return_value = _chat_completion('```json\n{"condition_name": "Anaemia", "confidence_score": 3}\n```')
+        create.return_value = _chat_stream('```json\n{"condition_name": "Anaemia", "confidence_score": 3}\n```')
 
-        result = LLMService().generate_diagnosis({'symptoms': [{'description': 'Fatigue'}]})
+        result = LLMService().diagnose('prompt')
 
         self.assertEqual(result['condition_name'], 'Anaemia')
         self.assertEqual(mock_openai.call_args.kwargs['base_url'], 'http://llm.local:8080/v1')
         self.assertEqual(mock_openai.call_args.kwargs['api_key'], 'not-needed')
-        # Web-request calls stay under the 300 s proxy limit and never retry.
-        self.assertEqual((mock_openai.call_args.kwargs['timeout'], mock_openai.call_args.kwargs['max_retries']), (270, 0))
+        # Diagnoses run on the worker, streamed, so the saved timeout applies in full; nothing is retried.
+        self.assertEqual((mock_openai.call_args.kwargs['timeout'], mock_openai.call_args.kwargs['max_retries']), (900, 0))
+        self.assertTrue(create.call_args.kwargs['stream'])
+        # Calls inside a web request, such as report chat, stay under the 300 s proxy limit.
+        openai_client(get_ai_config(ROLE_DIAGNOSIS))
+        self.assertEqual(mock_openai.call_args.kwargs['timeout'], REQUEST_TIMEOUT_CAP_SECONDS)
         # The saved model is used, but a differential needs room: a saved limit below the floor is raised,
         # since a reply cut off mid-object is not parseable at all (utils.llm_service.DIAGNOSIS_REPLY_TOKENS).
         self.assertEqual(create.call_args.kwargs['model'], 'qwen3-8b')
@@ -283,15 +298,15 @@ class AISettingsRuntimeTests(TestCase):
             role=ROLE_DIAGNOSIS, base_url='http://llm.local:8080/v1', model='qwen3-8b', temperature=0.8,
         )
         create = mock_openai.return_value.chat.completions.create
-        create.return_value = _chat_completion('{"condition_name": "Cold"}')
+        create.side_effect = lambda **_: _chat_stream('{"condition_name": "Cold"}')
 
-        LLMService().generate_diagnosis({'symptoms': [{'description': 'Cough'}]})
+        LLMService().diagnose('prompt')
         self.assertEqual(create.call_args.kwargs['temperature'], 0.8)
         # Report review does not inherit the diagnosis temperature while it uses the diagnosis connection.
         self.assertIsNone(get_ai_config(ROLE_REPORT_REVIEW).temperature)
 
         AIServiceConfig.objects.filter(role=ROLE_DIAGNOSIS).update(temperature=None)
-        LLMService().generate_diagnosis({'symptoms': [{'description': 'Cough'}]})
+        LLMService().diagnose('prompt')
         self.assertEqual(create.call_args.kwargs['temperature'], 0.3)
 
     @patch('ai_settings.client.OpenAI')
@@ -303,20 +318,62 @@ class AISettingsRuntimeTests(TestCase):
             body=None,
         )
         create = mock_openai.return_value.chat.completions.create
-        create.side_effect = [rejected, _chat_completion('{"condition_name": "Cold"}')]
+        create.side_effect = [rejected, _chat_stream('{"condition_name": "Cold"}')]
 
-        result = LLMService().generate_diagnosis({'symptoms': [{'description': 'Cough'}]})
+        result = LLMService().diagnose('prompt')
 
         self.assertEqual(result['condition_name'], 'Cold')
         self.assertEqual(create.call_count, 2)
         self.assertNotIn('response_format', create.call_args_list[1].kwargs)
 
-    def test_unconfigured_diagnosis_returns_placeholder(self):
+    def test_unconfigured_diagnosis_is_refused(self):
         AIServiceConfig.objects.create(role=ROLE_DIAGNOSIS, enabled=False, model='qwen3-8b', base_url='http://llm.local/v1')
 
-        result = LLMService().generate_diagnosis({'symptoms': [{'description': 'Cough'}]})
+        with self.assertRaisesMessage(LLMError, 'not set up'):
+            LLMService().diagnose('prompt')
+        self.assertEqual(LLMService().placeholder_diagnosis()['condition_name'], 'LLM Service Not Configured')
 
-        self.assertEqual(result['condition_name'], 'LLM Service Not Configured')
+    @patch('ai_settings.client.OpenAI')
+    def test_streamed_diagnosis_reports_thinking_then_writing(self, mock_openai):
+        AIServiceConfig.objects.create(role=ROLE_DIAGNOSIS, base_url='http://llm.local:8080/v1', model='qwen3-8b')
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _chat_stream('{"condition_name": "Cold"}', reasoning=['Cough ', 'and no ', 'fever.'])
+        seen = []
+
+        result = LLMService().diagnose('prompt', on_progress=lambda p: seen.append((p.phase, p.reasoning_tokens, p.reply_tokens)))
+
+        self.assertEqual(result['condition_name'], 'Cold')
+        self.assertEqual(seen[:4], [('thinking', 1, 0), ('thinking', 2, 0), ('thinking', 3, 0), ('writing', 3, 1)])
+        self.assertEqual(seen[-1], ('writing', 3, 7))
+
+    @patch('ai_settings.client.OpenAI')
+    def test_thinking_sent_inline_is_counted_as_thinking_and_left_out_of_the_answer(self, mock_openai):
+        AIServiceConfig.objects.create(role=ROLE_DIAGNOSIS, base_url='http://llm.local:8080/v1', model='qwen3-8b')
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _chat_stream('<think>Maybe {a cold}.</think>\n{"condition_name": "Cold"}', size=8)
+        seen = []
+
+        result = LLMService().diagnose('prompt', on_progress=lambda p: seen.append(p.phase))
+
+        self.assertEqual(result['condition_name'], 'Cold')
+        self.assertEqual(seen[:3], ['thinking', 'thinking', 'thinking'])
+        self.assertEqual(seen[-1], 'writing')
+
+    @patch('ai_settings.client.OpenAI')
+    def test_a_silent_model_or_one_that_never_answers_is_explained(self, mock_openai):
+        AIServiceConfig.objects.create(
+            role=ROLE_DIAGNOSIS, base_url='http://llm.local:8080/v1', model='qwen3-8b', timeout_seconds=1200,
+        )
+        create = mock_openai.return_value.chat.completions.create
+        create.side_effect = APITimeoutError(request=httpx.Request('POST', 'http://llm.local:8080/v1/chat/completions'))
+        with self.assertRaisesMessage(LLMError, 'sent nothing for 1200 seconds (APITimeoutError)'):
+            LLMService().diagnose('prompt')
+
+        # A reasoning model can spend its whole token allowance thinking.
+        create.side_effect = None
+        create.return_value = _chat_stream('', reasoning=['Thinking'] * 3)
+        with self.assertRaisesMessage(LLMError, f'used all {DIAGNOSIS_REPLY_TOKENS} max tokens thinking'):
+            LLMService().diagnose('prompt')
 
     @patch('utils.vlm_pdf_parser.requests.post')
     def test_ocr_parser_uses_saved_server_without_restart(self, mock_post):

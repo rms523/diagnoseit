@@ -5,21 +5,36 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
+from ai_settings.client import StreamProgress
+from ai_settings.services import AIConfig
 from medical_reports.models import MedicalReport, TestResult
 from prescriptions.models import Medication, Prescription
 from symptoms.models import Symptom, SymptomLog
-from utils.llm_service import LLMError
+from utils.llm_service import LLMError, LLMService
 from .models import Diagnosis, DiagnosisHistory, HealthTrend
+from .tasks import DiagnosisStopped, ProgressReporter, generate_diagnosis_task
 
 User = get_user_model()
 
 PAGE_SIZE = settings.REST_FRAMEWORK["PAGE_SIZE"]
+
+def _config(enabled=True):
+    return AIConfig(
+        role="diagnosis", source="database", enabled=enabled, provider="openai",
+        base_url="http://model.invalid/v1", api_key="k", model="test-model", timeout_seconds=1200, max_tokens=1000,
+    )
+
+
+CONFIGURED = patch("utils.llm_service.get_ai_config", return_value=_config())
+NOT_CONFIGURED = patch("utils.llm_service.get_ai_config", return_value=_config(enabled=False))
+QUEUE = "diagnosis.tasks.generate_diagnosis_task.delay"
 
 FAKE_LLM_DIAGNOSIS = {
     "condition_name": "Iron deficiency",
@@ -50,6 +65,7 @@ def _trend(user, parameter_name="Creatinine"):
 
 class DiagnosisAPITests(TestCase):
     def setUp(self):
+        cache.clear()  # the five-a-minute generate limit
         self.user = User.objects.create_user(username="patient", password="testpass123")
         self.other = User.objects.create_user(username="stranger", password="testpass123")
         self.client = APIClient()
@@ -149,29 +165,59 @@ class DiagnosisAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(HealthTrend.objects.get(pk=response.data["id"]).user, self.user)
 
-    @patch("diagnosis.views.generate_diagnosis", return_value=FAKE_LLM_DIAGNOSIS)
-    def test_generate_requires_symptoms_or_test_results(self, mock_generate):
+    @CONFIGURED
+    @patch(QUEUE)
+    def test_generate_requires_symptoms_or_test_results(self, queue, _config):
         response = self.client.post("/api/diagnosis/diagnoses/generate/", {}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        mock_generate.assert_not_called()
+        queue.assert_not_called()
 
-    @patch("diagnosis.views.generate_diagnosis", return_value=FAKE_LLM_DIAGNOSIS)
-    def test_generate_saves_diagnosis_and_history_for_requester(self, mock_generate):
+    @CONFIGURED
+    @patch(QUEUE)
+    def test_generate_queues_a_diagnosis_that_the_worker_completes(self, queue, _config):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/diagnosis/diagnoses/generate/",
+                {"symptoms": [{"description": "Fatigue", "severity": 2}]},
+                format="json",
+            )
+
+        # The request returns at once; the model is asked on the worker, which a web request cannot wait for.
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual((response.data["status"], response.data["progress"]), ("PENDING", {}))
+        diagnosis = Diagnosis.objects.get(pk=response.data["id"])
+        self.assertEqual(diagnosis.user, self.user)
+        diagnosis_id, prompt = queue.call_args.args
+        self.assertEqual(diagnosis_id, diagnosis.id)
+        self.assertIn("- Fatigue (Severity: 2", prompt)
+
+        with patch.object(LLMService, "diagnose", return_value=FAKE_LLM_DIAGNOSIS) as diagnose:
+            generate_diagnosis_task(diagnosis_id, prompt)
+
+        self.assertEqual(diagnose.call_args.args, (prompt,))
+        diagnosis.refresh_from_db()
+        self.assertEqual((diagnosis.status, diagnosis.condition_name), ("COMPLETED", "Iron deficiency"))
+        self.assertEqual(diagnosis.progress["phase"], "waiting")
+        self.assertEqual(diagnosis.history.count(), 1)
+
+    @NOT_CONFIGURED
+    @patch(QUEUE)
+    def test_without_a_model_a_placeholder_is_saved_at_once(self, queue, _config):
         response = self.client.post(
-            "/api/diagnosis/diagnoses/generate/",
-            {"symptoms": [{"description": "Fatigue", "severity": 2}]},
-            format="json",
+            "/api/diagnosis/diagnoses/generate/", {"symptoms": [{"description": "Fatigue"}]}, format="json"
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        diagnosis = Diagnosis.objects.get(pk=response.data["id"])
-        self.assertEqual(diagnosis.user, self.user)
-        self.assertEqual(diagnosis.condition_name, "Iron deficiency")
-        self.assertEqual(diagnosis.history.count(), 1)
+        self.assertEqual(
+            (response.data["status"], response.data["condition_name"]), ("COMPLETED", "LLM Service Not Configured")
+        )
+        queue.assert_not_called()
 
-    @patch("diagnosis.views.generate_diagnosis", return_value=FAKE_LLM_DIAGNOSIS)
-    def test_generate_only_sends_requesters_history_to_llm(self, mock_generate):
+    @CONFIGURED
+    @patch(QUEUE)
+    @patch.object(LLMService, "diagnosis_prompt", return_value="prompt")
+    def test_generate_only_sends_requesters_history_to_llm(self, mock_prompt, _queue, _config):
         own_report = MedicalReport.objects.create(
             user=self.user,
             title="Mine",
@@ -207,8 +253,8 @@ class DiagnosisAPITests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        user_data = mock_generate.call_args.args[0]
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        user_data = mock_prompt.call_args.args[0]
         self.assertEqual(
             [row["test_name"] for row in user_data["test_results"]], ["Ferritin"]
         )
@@ -224,6 +270,7 @@ class TimelineDiagnosisTests(TestCase):
     generate_url = "/api/diagnosis/diagnoses/generate/"
 
     def setUp(self):
+        cache.clear()  # the five-a-minute generate limit
         self.user = User.objects.create_user(
             username="tracker", password="testpass123", first_name="Anita", last_name="Rao",
             date_of_birth=date(1990, 1, 1), gender="F",
@@ -306,40 +353,85 @@ class TimelineDiagnosisTests(TestCase):
         )
         self.assertEqual((response.data["since"], response.data["omitted_dates"]), (self.days_ago(365).isoformat(), 0))
 
-    @patch("diagnosis.views.LLMService.generate_timeline_diagnosis", return_value=FAKE_LLM_DIAGNOSIS)
-    def test_timeline_diagnosis_is_saved_with_what_it_was_based_on(self, mock_generate):
-        response = self.client.post(
-            self.generate_url, {"mode": "timeline", "period": "6m", "summary": "Tracking HbA1c.", "symptoms": []}, format="json"
-        )
+    @CONFIGURED
+    @patch(QUEUE)
+    def test_timeline_diagnosis_is_saved_with_what_it_was_based_on(self, queue, _config):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                self.generate_url, {"mode": "timeline", "period": "6m", "summary": "Tracking HbA1c.", "symptoms": []},
+                format="json",
+            )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        diagnosis = Diagnosis.objects.get(pk=response.data["id"])
-        self.assertEqual((diagnosis.user, diagnosis.condition_name, diagnosis.history.count()), (self.user, "Iron deficiency", 1))
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(
             {key: response.data["context"][key] for key in ("mode", "period", "since", "summary_included")},
             {"mode": "timeline", "period": "6m", "since": self.days_ago(182).isoformat(), "summary_included": True},
         )
         self.assertEqual(response.data["context"]["counts"]["reports"], 1)
-        prompt = mock_generate.call_args.args[0]
+        diagnosis_id, prompt = queue.call_args.args
         self.assertIn("Tracking HbA1c.", prompt)
         self.assertIn("No new symptoms", prompt)
         self.user.refresh_from_db()
         self.assertEqual(self.user.health_summary, "Tracking HbA1c.")
 
-    @patch(
-        "diagnosis.views.LLMService.generate_timeline_diagnosis",
-        side_effect=LLMError("The AI diagnosis model did not respond (ReadTimeout)."),
-    )
-    def test_a_model_failure_is_reported_instead_of_saved(self, _generate):
-        before = Diagnosis.objects.count()
+        with patch.object(LLMService, "diagnose", return_value=FAKE_LLM_DIAGNOSIS):
+            generate_diagnosis_task(diagnosis_id, prompt)
 
-        response = self.client.post(self.generate_url, {"mode": "timeline", "summary": "Kept anyway."}, format="json")
+        diagnosis = Diagnosis.objects.get(pk=diagnosis_id)
+        self.assertEqual(
+            (diagnosis.user, diagnosis.status, diagnosis.condition_name, diagnosis.history.count()),
+            (self.user, "COMPLETED", "Iron deficiency", 1),
+        )
+        self.assertEqual(diagnosis.context["period"], "6m")
 
-        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
-        self.assertIn("did not respond", response.data["error"])
-        self.assertEqual(Diagnosis.objects.count(), before)
+    @CONFIGURED
+    @patch(QUEUE)
+    def test_a_model_failure_is_kept_on_the_diagnosis_and_never_sent_as_an_assessment(self, queue, _config):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(self.generate_url, {"mode": "timeline", "summary": "Kept anyway."}, format="json")
+        diagnosis_id, prompt = queue.call_args.args
+
+        failure = LLMError("The AI diagnosis model sent nothing for 1200 seconds (ReadTimeout).")
+        with patch.object(LLMService, "diagnose", side_effect=failure):
+            generate_diagnosis_task(diagnosis_id, prompt)
+
+        diagnosis = Diagnosis.objects.get(pk=response.data["id"])
+        self.assertEqual(diagnosis.status, "FAILED")
+        self.assertIn("sent nothing for 1200 seconds", diagnosis.error)
+        self.assertEqual(diagnosis.history.count(), 0)
         self.user.refresh_from_db()
         self.assertEqual(self.user.health_summary, "Kept anyway.")
+        # Neither a failed diagnosis nor one still being written is an earlier assessment of the patient.
+        Diagnosis.objects.create(user=self.user, condition_name="Queued one", description="", status="PENDING")
+        prompt = self.client.post(self.preview_url, {"period": "all"}, format="json").data["prompt"]
+        self.assertIn("Prediabetes", prompt)
+        self.assertNotIn("AI diagnosis failed", prompt)
+        self.assertNotIn("Queued one", prompt)
+
+    @NOT_CONFIGURED
+    def test_without_a_model_a_timeline_diagnosis_is_refused(self, _config):
+        before = Diagnosis.objects.count()
+
+        response = self.client.post(self.generate_url, {"mode": "timeline"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn("not set up", response.data["error"])
+        self.assertEqual(Diagnosis.objects.count(), before)
+
+    def test_progress_is_saved_and_deleting_the_diagnosis_stops_the_model(self):
+        diagnosis = Diagnosis.objects.create(user=self.user, condition_name="x", description="", status="PROCESSING")
+        reporter = ProgressReporter(diagnosis.id, "2026-10-21T10:00:00+00:00")
+
+        reporter(StreamProgress(reasoning_tokens=40))
+        diagnosis.refresh_from_db()
+        self.assertEqual(
+            {key: diagnosis.progress[key] for key in ("phase", "reasoning_tokens", "reply_tokens", "started_at")},
+            {"phase": "thinking", "reasoning_tokens": 40, "reply_tokens": 0, "started_at": "2026-10-21T10:00:00+00:00"},
+        )
+
+        diagnosis.delete()
+        with self.assertRaises(DiagnosisStopped):
+            reporter(StreamProgress(reasoning_tokens=40, reply_tokens=1))
 
     def test_invalid_period_and_long_histories(self):
         self.assertEqual(self.client.post(self.preview_url, {"period": "5y"}, format="json").status_code, 400)

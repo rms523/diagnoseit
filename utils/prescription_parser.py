@@ -202,6 +202,7 @@ def extract_medications(text: str) -> tuple[list[dict[str, str]], str]:
                 ],
                 max_tokens=max(config.max_tokens, 2000),
                 temperature=config.temperature_or(DEFAULT_TEMPERATURES[ROLE_REPORT_REVIEW]),
+                background=True,
             )
             payload = parse_json_object(reply)
             items = payload.get('medications')

@@ -430,7 +430,7 @@ def _review_part(
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
     temperature = config.temperature_or(DEFAULT_TEMPERATURES[ROLE_REPORT_REVIEW])
     try:
-        reply = chat_json(config, messages, max_tokens=config.max_tokens, temperature=temperature)
+        reply = chat_json(config, messages, max_tokens=config.max_tokens, temperature=temperature, background=True)
     except Exception as exc:
         logger.warning("Report review request failed for report %s: %s", report.id, exc)
         raise ReportReviewError(f'The review model did not respond ({type(exc).__name__}).') from exc

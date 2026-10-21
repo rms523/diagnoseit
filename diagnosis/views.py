@@ -10,11 +10,9 @@ from .serializers import (
     DiagnosisSerializer, DiagnosisListSerializer,
     DiagnosisHistorySerializer, HealthTrendSerializer
 )
-from utils.llm_service import (
-    GENDER_LABELS, LLMError, LLMService, analyze_health_trends, calculate_age, generate_diagnosis,
-    prepare_timeline_prompt,
-)
+from utils.llm_service import GENDER_LABELS, LLMService, calculate_age, prepare_timeline_prompt
 from utils.report_redaction import Redactor
+from .tasks import IN_PROGRESS_NAME, queue_diagnosis
 from .timeline import DEFAULT_PERIOD, PERIOD_DAYS, Timeline, build_timeline
 
 MAX_SUMMARY_CHARS = 4000
@@ -71,11 +69,13 @@ def _timeline_context(inputs: TimelineInputs, timeline: Timeline) -> dict:
     }
 
 
-def _confidence(value) -> int:
-    try:
-        return min(5, max(1, round(float(value))))
-    except (TypeError, ValueError):
-        return 3
+def _queued_diagnosis(user, prompt: str, **fields) -> Response:
+    """Save a PENDING diagnosis and hand it to the worker; the page polls it until the model has answered."""
+    diagnosis = Diagnosis.objects.create(
+        user=user, condition_name=IN_PROGRESS_NAME, description='', status=Diagnosis.PENDING, **fields,
+    )
+    queue_diagnosis(diagnosis.id, prompt)
+    return Response(DiagnosisSerializer(diagnosis).data, status=status.HTTP_202_ACCEPTED)
 
 
 class DiagnosisListCreateView(generics.ListCreateAPIView):
@@ -194,11 +194,18 @@ def generate_diagnosis_view(request):
         'medical_history': medical_history,
         '_redaction_names': [request.user.first_name, request.user.last_name],
     }
-    
-    # Generate diagnosis using LLM service
-    llm_response = generate_diagnosis(user_data)
-    
-    # Create diagnosis object
+
+    service = LLMService()
+    if service.config.is_configured:
+        return _queued_diagnosis(
+            request.user,
+            service.diagnosis_prompt(user_data),
+            symptoms_considered=symptoms,
+            test_results_considered=test_results,
+        )
+
+    # Without a model, a placeholder saying so is saved at once, as before diagnoses ran on the worker.
+    llm_response = service.placeholder_diagnosis()
     diagnosis_data = {
         'condition_name': llm_response.get('condition_name', 'Unknown Condition'),
         'description': llm_response.get('description', ''),
@@ -212,8 +219,7 @@ def generate_diagnosis_view(request):
     
     serializer = DiagnosisSerializer(data=diagnosis_data, context={'request': request})
     if serializer.is_valid():
-        # analysis is read-only on the serializer, so the differential is stored after saving.
-        diagnosis = serializer.save(analysis=llm_response.get('analysis') or {})
+        diagnosis = serializer.save()
         
         # Create diagnosis history entry
         DiagnosisHistory.objects.create(
@@ -247,34 +253,13 @@ def _generate_timeline_diagnosis(request):
         user.health_summary = inputs.summary
         user.save(update_fields=['health_summary'])
 
-    timeline, prompt = _timeline_prompt(user, inputs)
-    try:
-        reply = LLMService().generate_timeline_diagnosis(prompt)
-    except LLMError as exc:
-        return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+    if not LLMService().config.is_configured:
+        return Response(
+            {'error': 'AI diagnosis is not set up. Configure it in AI settings.'}, status=status.HTTP_502_BAD_GATEWAY
+        )
 
-    diagnosis = Diagnosis.objects.create(
-        user=user,
-        condition_name=str(reply.get('condition_name') or 'Unknown Condition')[:200],
-        description=str(reply.get('description') or ''),
-        confidence_score=_confidence(reply.get('confidence_score')),
-        symptoms_considered=inputs.symptoms,
-        test_results_considered=[],
-        recommendations=str(reply.get('recommendations') or ''),
-        follow_up_required=bool(reply.get('follow_up_required')),
-        follow_up_notes=str(reply.get('follow_up_notes') or ''),
-        # The differential, and the red flags the earlier code asked the model for and then threw away.
-        analysis=reply.get('analysis') or {},
-        context=_timeline_context(inputs, timeline),
-    )
-    DiagnosisHistory.objects.create(
-        diagnosis=diagnosis,
-        condition_name=diagnosis.condition_name,
-        description=diagnosis.description,
-        confidence_score=diagnosis.confidence_score,
-        recommendations=diagnosis.recommendations,
-    )
-    return Response(DiagnosisSerializer(diagnosis).data, status=status.HTTP_201_CREATED)
+    timeline, prompt = _timeline_prompt(user, inputs)
+    return _queued_diagnosis(user, prompt, symptoms_considered=inputs.symptoms, context=_timeline_context(inputs, timeline))
 
 
 @api_view(['POST'])
