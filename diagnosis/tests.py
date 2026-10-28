@@ -351,7 +351,7 @@ class TimelineDiagnosisTests(TestCase):
             response.data["counts"],
             {"symptoms": 2, "symptom_updates": 1, "reports": 2, "results": 4, "prescriptions": 1, "medications": 1, "assessments": 1},
         )
-        self.assertEqual((response.data["since"], response.data["omitted_dates"]), (self.days_ago(365).isoformat(), 0))
+        self.assertEqual(response.data["since"], self.days_ago(365).isoformat())
 
     @CONFIGURED
     @patch(QUEUE)
@@ -436,9 +436,9 @@ class TimelineDiagnosisTests(TestCase):
     def test_invalid_period_and_long_histories(self):
         self.assertEqual(self.client.post(self.preview_url, {"period": "5y"}, format="json").status_code, 400)
 
-        with patch("diagnosis.timeline.MAX_TIMELINE_CHARS", 300):
-            response = self.client.post(self.preview_url, {"period": "all"}, format="json")
+        response = self.client.post(self.preview_url, {"period": "all"}, format="json")
 
-        self.assertGreater(response.data["omitted_dates"], 0)
-        self.assertIn("earliest date", response.data["prompt"])
-        self.assertIn(self.days_ago(10).isoformat(), response.data["prompt"])
+        # Nothing is left out, however long the history.
+        self.assertNotIn("left out", response.data["prompt"])
+        for days in (365, 10):
+            self.assertIn(self.days_ago(days).isoformat(), response.data["prompt"])

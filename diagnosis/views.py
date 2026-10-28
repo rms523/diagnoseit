@@ -64,7 +64,6 @@ def _timeline_context(inputs: TimelineInputs, timeline: Timeline) -> dict:
         'since': timeline.since.isoformat() if timeline.since else None,
         'until': timeline.until.isoformat(),
         'counts': timeline.counts,
-        'omitted_dates': timeline.omitted_dates,
         'summary_included': bool(inputs.summary),
     }
 
@@ -276,7 +275,6 @@ def preview_timeline_diagnosis(request):
         'since': context['since'],
         'until': context['until'],
         'counts': context['counts'],
-        'omitted_dates': context['omitted_dates'],
     })
 
 

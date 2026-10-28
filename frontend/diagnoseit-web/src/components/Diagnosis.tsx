@@ -480,7 +480,7 @@ const GenerateModal: React.FC<GenerateModalProps> = ({ symptoms: availableSympto
             <IconInfo size={16} />
             <span>
               {timeline
-                ? 'Sends every lab result, symptom, prescription, and earlier AI assessment from this period, oldest first, so the AI can follow how your health changed. Long histories take longer, and the earliest dates are left out if the history is too long.'
+                ? 'Sends every lab result, symptom, prescription, and earlier AI assessment from this period, oldest first, so the AI can follow how your health changed. Long histories take longer.'
                 : 'The AI will analyze your selected symptoms along with your medical data to provide health insights.'}
             </span>
           </div>
@@ -491,7 +491,6 @@ const GenerateModal: React.FC<GenerateModalProps> = ({ symptoms: availableSympto
             <div className="form-group">
               <p className="form-hint">
                 {timelineDescription({ since: preview.since, counts: preview.counts })}
-                {preview.omitted_dates > 0 && ` · the ${plural(preview.omitted_dates, 'earliest date')} left out`}
               </p>
               <pre
                 style={{

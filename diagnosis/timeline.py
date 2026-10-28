@@ -3,8 +3,7 @@
 Lab results, symptoms (when each began, changed, and ended), prescriptions, and earlier AI assessments are
 listed oldest first under the date they happened, so the model can relate what changed to when. The
 account holder's name, phone numbers, and email addresses are redacted from free text; doctor names and
-report file names are left out. When the history is longer than the input budget, the earliest dates are
-left out and the timeline says so.
+report file names are left out. Every date in the period is sent, however long the history.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from .models import Diagnosis
 
 PERIOD_DAYS: dict[str, int | None] = {'3m': 91, '6m': 182, '1y': 365, '2y': 730, 'all': None}
 DEFAULT_PERIOD = '1y'
-MAX_TIMELINE_CHARS = 60_000  # about 15,000 tokens of history
 
 SEVERITY = dict(Symptom.SEVERITY_CHOICES)
 DURATION = dict(Symptom.DURATION_CHOICES)
@@ -38,7 +36,6 @@ class Timeline:
     since: date | None
     until: date
     counts: dict[str, int] = field(default_factory=dict)
-    omitted_dates: int = 0
 
 
 def build_timeline(user, period: str = DEFAULT_PERIOD, today: date | None = None) -> Timeline:
@@ -115,17 +112,9 @@ def build_timeline(user, period: str = DEFAULT_PERIOD, today: date | None = None
             counts['assessments'] += 1
 
     blocks = [f"{day.isoformat()}\n" + '\n'.join(events[day]) for day in sorted(events)]
-    total = sum(len(block) + 2 for block in blocks)
-    omitted = 0
-    while len(blocks) > 1 and total > MAX_TIMELINE_CHARS:
-        total -= len(blocks.pop(0)) + 2
-        omitted += 1
-
     header = f"Health timeline from {since.isoformat() if since else 'the first record'} to {today.isoformat()}, oldest first."
-    if omitted:
-        header += f" The {omitted} earliest date{'s are' if omitted != 1 else ' is'} left out to fit the model's input limit."
     body = '\n\n'.join(blocks) if blocks else 'Nothing was recorded in this period.'
-    return Timeline(text=f"{header}\n\n{body}", since=since, until=today, counts=dict(counts), omitted_dates=omitted)
+    return Timeline(text=f"{header}\n\n{body}", since=since, until=today, counts=dict(counts))
 
 
 def _cleaner(user) -> Callable[[object], str]:

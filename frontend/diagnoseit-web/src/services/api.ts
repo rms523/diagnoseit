@@ -537,7 +537,6 @@ export interface DiagnosisContext {
   since?: string | null;
   until?: string;
   counts?: DiagnosisTimelineCounts;
-  omitted_dates?: number;
   summary_included?: boolean;
 }
 
@@ -546,7 +545,6 @@ export interface DiagnosisTimelinePreview {
   since: string | null;
   until: string;
   counts: DiagnosisTimelineCounts;
-  omitted_dates: number;
 }
 
 /** One result in a trend; value, unit, and reference_range are in the trend's unit when unit_status is 'converted'. */
